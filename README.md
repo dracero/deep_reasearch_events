@@ -26,7 +26,7 @@ graph TD
 
 | File | Purpose |
 |------|---------|
-| `.env` | Environment variables (Tavily + OpenAI) |
+| `.env` | Environment variables (Tavily + Gemini) |
 | `state.py` | Graph states + Pydantic structured outputs |
 | `configuration.py` | Agent configuration (models, search params) |
 | `prompts.py` | System prompts for Planner, Researcher, Filter, Report |
@@ -35,7 +35,7 @@ graph TD
 
 ## How to Run
 
-1. Edit the API keys in your `.env` (use `.env.example` as a template). You'll need credentials for `TAVILY_API_KEY` and `OPENAI_API_KEY`.
+1. Edit the API keys in your `.env` (use `.env.example` as a template). You'll need credentials for `TAVILY_API_KEY` and `GEMINI_API_KEY`.
 2. Ensure you have `uv` installed, then run:
 
 ```bash
