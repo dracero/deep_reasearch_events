@@ -41,3 +41,38 @@ graph TD
 ```bash
 uv run python main.py
 ```
+
+## A2UI Frontend Architecture (Server-Driven UI)
+
+This project uses the Agent-to-UI (A2UI) protocol, where the LangGraph backend controls exactly what React components the frontend renders at any given step of the agent's reasoning process.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant App as React Frontend (App.tsx)
+    participant Server as FastAPI Server (server.py)
+    participant Graph as LangGraph Engine
+    
+    User->>App: Clicks "Investigar" (Search)
+    App->>Server: POST /api/research
+    Note over App,Server: Opens Server-Sent Events (SSE) Stream
+    Server->>Graph: graph.astream(initial_state)
+    
+    Note over Server,Graph: Node: plan_research
+    Graph-->>Server: yields "plan_research" state
+    Server-->>App: SSE: { component: 'SearchPlan', props: {...} }
+    App->>App: Dynamically renders <SearchPlan />
+    
+    Note over Server,Graph: Node: research_category
+    Graph-->>Server: yields "research_category" state
+    Server-->>App: SSE: { component: 'LoadingState', props: {...} }
+    App->>App: Dynamically renders <LoadingState />
+    
+    Note over Server,Graph: Node: filter_argentina
+    Graph-->>Server: yields "filter_argentina" state
+    Server-->>App: SSE: { component: 'EventTable', props: {events} }
+    App->>App: Dynamically renders <EventTable />
+    
+    Graph-->>Server: Finished
+    Server-->>App: Stream closed
+```
