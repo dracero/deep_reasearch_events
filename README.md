@@ -24,24 +24,25 @@ Aplicación web moderna responsable de decodificar flujos asíncronos en texto p
 ### 1. Arquitectura de Sistema (High-Level)
 ```mermaid
 graph TD
-    CLI[Usuario Web Frontend] -->|POST /api/chat (Mensaje)| O[Orchestrator - Port 8000]
+    CLI["Usuario Web Frontend"] -->|"POST /api/chat (Mensaje)"| O["Orchestrator - Port 8000"]
     
     subgraph Orquestador BeeAI
-        O -->|Evalúa Intent| LLM_Router{¿Qué quiere el usuario?}
+        O -->|"Evalúa Intent"| LLM_Router{"¿Qué quiere el usuario?"}
     end
     
-    LLM_Router -->|Eventos| AE((Agente Eventos <br> Port 8001))
-    LLM_Router -->|Viajes| AV((Agente Viajes <br> Port 8002))
-    LLM_Router -->|Ambos simultáneo| AE & AV
+    LLM_Router -->|"Eventos"| AE(("Agente Eventos <br> Port 8001"))
+    LLM_Router -->|"Viajes"| AV(("Agente Viajes <br> Port 8002"))
+    LLM_Router -->|"Ambos simultáneo"| AE
+    LLM_Router -->|"Ambos simultáneo"| AV
     
     subgraph Microservicios Especiales A2A
-    AE -->|Agent Graph| T_AE[Tavily Search API]
-    AV -->|Agent Graph| T_AV[Tavily Search API]
+    AE -->|"Agent Graph"| T_AE["Tavily Search API"]
+    AV -->|"Agent Graph"| T_AV["Tavily Search API"]
     end
     
-    AE -.->|Protocolo A2A Schema / Stream| O
-    AV -.->|Protocolo A2A Schema / Stream| O
-    O -.->|Mapeo a Comandos SSE| CLI
+    AE -.->|"Protocolo A2A Schema / Stream"| O
+    AV -.->|"Protocolo A2A Schema / Stream"| O
+    O -.->|"Mapeo a Comandos SSE"| CLI
 ```
 
 ### 2. Flujo del Frontend (UI Stream Rendering)
