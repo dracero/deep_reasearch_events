@@ -36,6 +36,8 @@ try:
 except ImportError:
     async_playwright = None
 
+from duckduckgo_search import DDGS
+
 from groq import RateLimitError
 from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
@@ -100,6 +102,19 @@ def _invoke_with_backoff(chain, messages: list, max_attempts: int = 5):
         try:
             return chain.invoke(messages)
         except RateLimitError as e:
+            error_msg = str(e).lower()
+            if 'tokens per day' in error_msg or 'tpd' in error_msg:
+                logger.warning("Daily Token Limit hit in Viajes! Falling back to secondary model 'llama-3.3-70b-versatile'.")
+                fallback_llm = _get_llm("llama-3.3-70b-versatile")
+                if hasattr(chain, 'bound') and hasattr(chain, 'kwargs') and 'response_format' in chain.kwargs:
+                    raise Exception(f"RateLimitError on structured LLM, requires manual schema rescue: {e}")
+                
+                try:
+                    return fallback_llm.invoke(messages)
+                except Exception as fallback_e:
+                    logger.error(f"Fallback model also failed: {fallback_e}")
+                    raise e
+
             if attempt == max_attempts - 1:
                 raise
             logger.warning(
@@ -114,7 +129,7 @@ def _invoke_with_backoff(chain, messages: list, max_attempts: int = 5):
 
 @traceable(name="tavily_search_flights", run_type="tool")
 def _tavily_search(query: str, config: Configuration) -> List[dict]:
-    """Execute a single Tavily search and return results."""
+    """Execute a single Tavily search and return results. Falls back to DuckDuckGo on error."""
     client = TavilyClient()
     try:
         response = client.search(
@@ -125,8 +140,21 @@ def _tavily_search(query: str, config: Configuration) -> List[dict]:
         )
         return response.get("results", [])
     except Exception as e:
-        logger.warning(f"Tavily search failed for '{query}': {e}")
-        return []
+        logger.warning(f"Tavily search failed for '{query}': {e}. Falling back to DuckDuckGo.")
+        try:
+            ddgs = DDGS()
+            results = ddgs.text(query, max_results=config.tavily_max_results)
+            formatted_results = []
+            for r in results:
+                formatted_results.append({
+                    "title": r.get("title", ""),
+                    "url": r.get("href", ""),
+                    "content": r.get("body", "")
+                })
+            return formatted_results
+        except Exception as fallback_e:
+            logger.error(f"DuckDuckGo fallback also failed for '{query}': {fallback_e}")
+            return []
 
 async def _async_scrape_spa(url: str, timeout: int = 15000) -> str:
     """Async Playwright scraping logic."""

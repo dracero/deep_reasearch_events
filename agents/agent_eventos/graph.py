@@ -44,6 +44,8 @@ try:
 except ImportError:
     async_playwright = None
 
+from duckduckgo_search import DDGS
+
 from state import (
     AgentState,
     ResearcherState,
@@ -94,14 +96,37 @@ def _get_llm(model_name: str, temperature: float = 0.0) -> ChatGroq:
 
 async def _invoke_with_backoff(chain, messages: list, max_attempts: int = 5):
     """Invoke a LangChain chain with exponential backoff on 429 rate limit errors.
-    Uses asyncio.sleep to avoid blocking the event loop during waits.
+    If a daily token limit is hit (TPD), fallback to a secondary model.
     """
     delay = 5.0
     for attempt in range(max_attempts):
         try:
             # Run the synchronous chain.invoke in a thread so the event loop stays free
             return await asyncio.get_event_loop().run_in_executor(None, chain.invoke, messages)
-        except RateLimitError:
+        except RateLimitError as e:
+            error_msg = str(e).lower()
+            # If the limit is daily tokens (TPD) or a huge wait time, fallback immediately
+            if 'tokens per day' in error_msg or 'tpd' in error_msg:
+                logger.warning("Daily Token Limit hit! Falling back to secondary model 'llama-3.3-70b-versatile'.")
+                # Dynamically build a fallback chain matching the original structure
+                fallback_llm = _get_llm("llama-3.3-70b-versatile")
+                
+                # Check if the original chain had a structured output schema attached
+                if hasattr(chain, 'bound') and hasattr(chain, 'kwargs') and 'response_format' in chain.kwargs:
+                    # It's an LLM with structured output, unfortunately we don't have the explicit Pydantic class here easily
+                    # Try to see if it's stored in the kwargs or mapper
+                    raise Exception(f"RateLimitError on structured LLM, requires manual schema rescue: {e}")
+                
+                # Simple LLM fallback (like the planner or report generator)
+                try:
+                    # Si era with_structured_output, chain es un RunnableBinding o RunnableMap. 
+                    # Intentamos reconstruirlo suciamente copiando el step pero es complejo.
+                    # Mejor fallback temporal para LLM simple:
+                    return await asyncio.get_event_loop().run_in_executor(None, fallback_llm.invoke, messages)
+                except Exception as fallback_e:
+                    logger.error(f"Fallback model also failed: {fallback_e}")
+                    raise e
+                    
             if attempt == max_attempts - 1:
                 raise
             logger.warning(
@@ -198,7 +223,7 @@ def _parse_failed_generation(error, pydantic_model):
 
 @traceable(name="tavily_search", run_type="tool")
 def _tavily_search(query: str, config: Configuration, include_domains: list[str] | None = None) -> List[dict]:
-    """Execute a single Tavily search and return results."""
+    """Execute a single Tavily search and return results. Falls back to DuckDuckGo on error."""
     client = TavilyClient()
     try:
         kwargs = dict(
@@ -212,8 +237,28 @@ def _tavily_search(query: str, config: Configuration, include_domains: list[str]
         response = client.search(**kwargs)
         return response.get("results", [])
     except Exception as e:
-        logger.warning(f"Tavily search failed for '{query}': {e}")
-        return []
+        logger.warning(f"Tavily search failed for '{query}': {e}. Falling back to DuckDuckGo.")
+        try:
+            ddgs = DDGS()
+            # If include_domains is provided, we can append 'site:domain1 OR site:domain2' to the query
+            ddgs_query = query
+            if include_domains:
+                site_query = " OR ".join([f"site:{d}" for d in include_domains])
+                ddgs_query = f"{query} ({site_query})"
+            
+            results = ddgs.text(ddgs_query, max_results=config.tavily_max_results)
+            # Map DDGS results to Tavily format
+            formatted_results = []
+            for r in results:
+                formatted_results.append({
+                    "title": r.get("title", ""),
+                    "url": r.get("href", ""),
+                    "content": r.get("body", "")
+                })
+            return formatted_results
+        except Exception as fallback_e:
+            logger.error(f"DuckDuckGo fallback also failed for '{query}': {fallback_e}")
+            return []
 
 
 # Dominios SPA que requieren JS rendering para contenido actualizado

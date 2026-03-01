@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import uuid
-from typing import AsyncGenerator
+from typing import AsyncGenerator, List, Dict
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -37,6 +37,7 @@ app.add_middleware(
 
 class ChatRequest(BaseModel):
     message: str
+    history: List[Dict[str, str]] = []
     active_agent: str = ""   # "viajes" | "eventos" | "" — bypass the router when set
     travel_context: dict = {}  # Carry over origin/destination from the previous turn
 
@@ -145,10 +146,17 @@ async def unified_chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]
         decision = {"intent": "eventos", "target_date": message}
         logger.info(f"[⚡️ Bypass] Active agent is '{active_agent}' — skipping LLM router.")
     else:
-        decision = await determine_intent(message)
+        decision = await determine_intent(message, request.history)
         intent = decision.get("intent", "eventos")
 
     logger.info(f"Orchestrator Decision: {intent} (params: {decision})")
+
+    if intent == "conversacional":
+        # Atajo: respondemos directamente sin llamar a los agentes
+        respuesta = decision.get("text_response", "¡Hola! Estoy acá para ayudarte con búsquedas de eventos o viajes. ¿Qué necesitas?")
+        yield f"data: {json.dumps({'type': 'ui', 'component': 'AgentBadge', 'props': {'agent_name': 'Orchestrator'}})}\n\n"
+        yield f"data: {json.dumps({'type': 'ui', 'component': 'UserChat', 'props': {'message': respuesta}})}\n\n"
+        return
 
     if intent in ["eventos", "ambos"]:
         # Params para el Agente Eventos

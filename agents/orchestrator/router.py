@@ -6,7 +6,7 @@ import os
 from datetime import datetime
 
 from beeai_framework.adapters.groq.backend.chat import GroqChatModel
-from beeai_framework.backend.message import SystemMessage, UserMessage
+from beeai_framework.backend.message import SystemMessage, UserMessage, AssistantMessage
 
 from dotenv import load_dotenv
 from pathlib import Path
@@ -27,6 +27,7 @@ class RoutingDecision(BaseModel):
     origin: str = ""
     destination: str = ""
     travel_dates: str = ""
+    text_response: str = ""
 
 def build_router_model() -> GroqChatModel:
     return GroqChatModel(
@@ -43,18 +44,20 @@ AGENTES Y REGLAS DE DECISIÓN:
 1. "eventos" -> El usuario quiere INFORMARSE sobre qué eventos, torneos o streamings van a ocurrir. (Ej: "¿Qué eventos hay en junio?", "¿Qué partidos juega Argentina?", "¿Cuándo es el mundial?").
 2. "viajes" -> El usuario pide EXPRESAMENTE cómo LLEGAR/VIAJAR a un destino físico. Si el mensaje central es sobre "ruta", "vuelo", "pasaje", "combinación", "precio de viaje", "ida y vuelta", O "cómo ir de X a Y", el intent **SIEMPRE ES VIAJES**. Si el usuario menciona un evento (ej. "el partido", "el recital", "el mundial") pero SOLO lo hace para dar contexto al viaje y conseguir una "ruta o vuelo" hacia allí, el intent ES SOLAMENTE VIAJES.
 3. "ambos" -> El usuario hace explícitamente DOS pedidos distintos: quiere información/conocer qué eventos hay Y TAMBIÉN quiere opciones de vuelo para ir a verlos. (Ej: "Decime qué partidos hay en Miami y buscame vuelos para ir a verlos").
+4. "conversacional" -> El usuario simplemente está saludando, despidiéndose, dando las gracias, o haciendo charla general ("hola", "cómo estás", "gracias", "quién sos"). 
 
 Respondé SOLO con este JSON estricto (no uses markdown):
 {
-  "intent": "(eventos|viajes|ambos)",
+  "intent": "(eventos|viajes|ambos|conversacional)",
   "target_date": "YYYY-MM-DD (si aplica para eventos)",
   "origin": "Ciudad de origen (si aplica para viajes)",
   "destination": "Destino o Evento (si aplica para viajes)",
-  "travel_dates": "Fechas estimadas (si aplica para viajes)"
+  "travel_dates": "Fechas estimadas (si aplica para viajes)",
+  "text_response": "Si el intent es conversacional, escribí acá una respuesta amable y cortés para el usuario. Sino dejalo vacío."
 }
 """
 
-async def determine_intent(user_message: str) -> dict:
+async def determine_intent(user_message: str, history: list[dict] = None) -> dict:
     llm = build_router_model()
 
     # Inyectamos la fecha/hora real para que el LLM resuelva "hoy", "mañana", etc.
@@ -63,13 +66,21 @@ async def determine_intent(user_message: str) -> dict:
         ROUTER_PROMPT
         + f"\n\n[CONTEXTO DEL SISTEMA]\n"
         f"HOY es: {current_date}. Usá esta fecha para resolver referencias "
-        f"temporales relativas (hoy, mañana, la semana que viene, etc.)."
+        f"temporales relativas (hoy, mañana, la semana que viene, etc.).\n"
+        f"IMPORTANTE: Analizá el último mensaje usando el contexto histórico reciente si existe."
     )
 
-    messages = [
-        SystemMessage(system_prompt),
-        UserMessage(user_message),
-    ]
+    messages = [SystemMessage(system_prompt)]
+    
+    if history:
+        # Añadir al prompt los mensajes pasados excepto el mensaje actual que ya vino en 'history' pero lo repetimos en user_message
+        for msg in history[:-1]:  
+            if msg.get("role") == "user":
+                messages.append(UserMessage(msg.get("content", "")))
+            elif msg.get("role") == "assistant":
+                messages.append(AssistantMessage(msg.get("content", "")))
+
+    messages.append(UserMessage(user_message))
 
     try:
         # BeeAI GroqChatModel.run() — sin response_format para evitar
@@ -97,7 +108,7 @@ async def determine_intent(user_message: str) -> dict:
         decision = json.loads(cleaned)
 
         # Validar que el intent sea uno de los esperados
-        valid_intents = {"eventos", "viajes", "ambos"}
+        valid_intents = {"eventos", "viajes", "ambos", "conversacional"}
         if decision.get("intent") not in valid_intents:
             logger.warning(f"Invalid intent '{decision.get('intent')}', defaulting to 'eventos'")
             decision["intent"] = "eventos"

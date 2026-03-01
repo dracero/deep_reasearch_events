@@ -19,11 +19,11 @@ class Configuration(BaseModel):
         description="Model for generating multi-segment route plans. Needs high reasoning.",
     )
     clarify_model: str = Field(
-        default="llama-3.1-8b-instant",
+        default="llama-3.3-70b-versatile",
         description="Model for generating the pre-search clarifying question. Tiny task, fast model.",
     )
     researcher_model: str = Field(
-        default="llama-3.1-8b-instant",    # High RPM limit — fires in parallel for each segment
+        default="llama-3.3-70b-versatile",    # High RPM limit — fires in parallel for each segment
         description="Model for analysing search results and extracting routes per segment.",
     )
     ranker_model: str = Field(
@@ -31,7 +31,7 @@ class Configuration(BaseModel):
         description="Model for ranking and optimizing routes.",
     )
     report_model: str = Field(
-        default="llama-3.1-8b-instant",      # Fast model, just formats JSON output
+        default="llama-3.3-70b-versatile",      # Fast model, just formats JSON output
         description="Model for generating the final itinerary JSON.",
     )
 

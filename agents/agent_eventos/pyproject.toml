@@ -22,5 +22,6 @@ dependencies = [
     "tavily-python>=0.7.21",
     "uvicorn>=0.41.0",
     "a2a-sdk[all]>=0.3.0",
+    "duckduckgo-search>=8.1.1",
 ]
 

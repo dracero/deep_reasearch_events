@@ -23,6 +23,9 @@ function App() {
   const [activeAgent, setActiveAgent] = useState<string>('');       // 'viajes' | 'eventos' | ''
   const [travelContext, setTravelContext] = useState<Record<string, string>>({});
 
+  // Guardamos el historial de la conversación {role: 'user' | 'assistant', content: string}
+  const [chatHistory, setChatHistory] = useState<{ role: string, content: string }[]>([]);
+
   // Guardamos un historial de los componentes que el agente va devolviendo en formato A2UI
   const [agentComponents, setAgentComponents] = useState<A2UIEvent[]>([]);
 
@@ -37,6 +40,12 @@ function App() {
       { type: 'ui', component: 'UserChat', props: { message: chatMessage } }
     ]);
     const sendMsg = chatMessage;
+
+    // Agregamos al historial
+    const userMsgObj = { role: 'user', content: sendMsg };
+    const currentHistory = [...chatHistory];
+    setChatHistory(prev => [...prev, userMsgObj]);
+
     setChatMessage('');
 
     // Determine if this is a follow-up (active agent set) or a new search
@@ -52,6 +61,7 @@ function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: sendMsg,
+          history: currentHistory, // Enviamos el historial previo
           active_agent: activeAgent,  // Tells the orchestrator to bypass LLM router
           travel_context: travelContext,
         }),
@@ -113,6 +123,14 @@ function App() {
           }
         }
       }
+
+      // Al terminar el stream, agregamos una nota estructural al historial
+      // para que el LLM sepa que el agente le dio una respuesta al usuario.
+      setChatHistory(prev => [
+        ...prev,
+        { role: 'assistant', content: '[Respuesta del agente renderizada en la Interfaz de Usuario]' }
+      ]);
+
     } catch (error: any) {
       const isRateLimit = error?.message?.toLowerCase().includes('rate') || error?.message?.includes('429');
       const displayMsg = isRateLimit
