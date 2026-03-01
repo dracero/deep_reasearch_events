@@ -25,52 +25,21 @@ categorias:
       audiencia masiva en Argentina.
     incluir:
       futbol_argentino:
-        descripcion: Torneos del fútbol argentino
+        descripcion: Torneos de fútbol de máxima categoría
         torneos_validos:
           - "Liga Profesional de Fútbol (LPF) — Primera División Argentina"
-          - "Copa Argentina"
-          - "Copa de la Liga Profesional"
-          - "Torneo de Verano / Pretemporada oficial AFA"
+          - "Copa Argentina (Sólo si participan equipos de Primera)"
+          - "Copa Libertadores y Sudamericana (Sólo equipos argentinos)"
         equipos_referencia:
           - River Plate
           - Boca Juniors
-          - Racing Club
+          - Racing
           - Independiente
           - San Lorenzo
-          - Huracán
-          - Vélez Sársfield
-          - Estudiantes de La Plata
-          - Lanús
-          - Defensa y Justicia
-          - Talleres (Córdoba)
-          - Belgrano
-          - Atlético Tucumán
-          - Godoy Cruz
-          - Rosario Central
-          - Newell's Old Boys
-          - Banfield
-          - Arsenal (Sarandí)
-          - Platense
-          - Tigre
-          - Barracas Central
-          - Riestra
-          - Gimnasia (La Plata)
-          - Instituto
         nota: >
-          Solo partidos de equipos de la Primera División. NO incluir Segunda
-          División (Primera Nacional) ni ligas del ascenso.
-
-      copas_internacionales_argentina:
-        descripcion: >
-          Participación de equipos argentinos en torneos internacionales.
-        torneos_validos:
-          - "Copa Libertadores (CONMEBOL)"
-          - "Copa Sudamericana (CONMEBOL)"
-          - "Recopa Sudamericana"
-          - "Copa Intercontinental / Mundial de Clubes"
-        criterio: >
-          Al menos un equipo debe ser argentino. Si la fase es grupal,
-          considerar impacto Medio. Si es octavos en adelante, impacto Alto.
+          SOLO partidos que involucren al menos un equipo de Primera División.
+          NO incluir ligas de ascenso o equipos 100% internacionales, pero SÍ
+          incluir copas internacionales y nacionales si hay Primera División.
 
       seleccion_argentina:
         descripcion: Partidos de cualquier selección nacional argentina
@@ -111,19 +80,12 @@ categorias:
 
   streaming:
     descripcion: >
-      Estrenos de contenido en plataformas de video-on-demand que generen
-      picos de tráfico en Argentina.
+      Estrenos de contenido en EXCLUSIVAMENTE plataformas oficiales de video-on-demand 
+      que generen picos de tráfico en Argentina.
     plataformas_validas:
       - Netflix
       - Disney+
-      - Amazon Prime Video
       - HBO Max / Max
-      - Star+ (fusionado con Disney+ en Argentina)
-      - Apple TV+
-      - Paramount+
-      - Peacock (cuando está disponible en LAT)
-      - Pluto TV
-      - Crunchyroll (para anime con gran base argentina)
     tipos_contenido:
       series:
         incluir:
@@ -175,12 +137,10 @@ categorias:
       excluir:
         - "Juegos indie sin distribución masiva"
         - "DLCs menores o parches de balance"
-      plataformas_referencia:
+      fuentes_oficiales_referencia:
         - Steam
-        - PlayStation Network
-        - Xbox Game Pass
-        - Epic Games Store
-        - Nintendo eShop
+        - IGN
+        - Twitch
 
   especiales:
     descripcion: >
@@ -235,13 +195,11 @@ impacto:
 # REGLAS GLOBALES DE EXCLUSIÓN
 # ─────────────────────────────────────────────────────────────────────────────
 exclusiones_globales:
-  - "Eventos sin fecha/hora confirmada o estimable"
-  - "Eventos exclusivos de TV de cable sin streaming verificable"
+  - "Eventos sin fecha/hora EXACTA confirmada que coincida con lo solicitado"
+  - "Fútbol de segunda división, ligas internacionales, o cualquier partido que NO sea Selección Argentina o Primera División"
+  - "Contenido fuera de Netflix, Disney+, HBO, Steam, IGN, Twitch, ESPN, FIFA, NBA, o similares fuentes oficiales"
   - "Noticias o eventos que ya ocurrieron (más de 24hs en el pasado)"
-  - "Eventos de otros países sin participación argentina o sin audiencia probada en Argentina"
-  - >
-    Contenido paywalled sin acceso masivo (ej. DAZN en mercados donde no opera
-    en Argentina)
+  - "Eventos de otros países sin participar ni tener audiencia probada en Argentina"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # HORARIO DE REFERENCIA

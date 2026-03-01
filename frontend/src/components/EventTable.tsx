@@ -4,6 +4,7 @@ import { CalendarDays, ExternalLink, Activity } from 'lucide-react';
 interface EventInfo {
     evento: string;
     categoria: string;
+    proveedor?: string;
     fecha: string;
     hora_argentina: string;
     descripcion: string;
@@ -46,6 +47,7 @@ const EventTable: React.FC<EventTableProps> = ({ events }) => {
                     <thead>
                         <tr className="bg-slate-800/80 text-slate-300 text-sm uppercase tracking-wider">
                             <th className="p-4 font-semibold">Evento</th>
+                            <th className="p-4 font-semibold">Proveedor</th>
                             <th className="p-4 font-semibold">Horario (ART)</th>
                             <th className="p-4 font-semibold">Impacto</th>
                             <th className="p-4 font-semibold">Fuente</th>
@@ -67,6 +69,11 @@ const EventTable: React.FC<EventTableProps> = ({ events }) => {
                                             {ev.descripcion}
                                         </span>
                                     </div>
+                                </td>
+                                <td className="p-4 whitespace-nowrap">
+                                    <span className="text-slate-200 font-medium px-2 py-1 bg-slate-800 rounded-md border border-slate-700 shadow-sm">
+                                        {ev.proveedor || 'N/A'}
+                                    </span>
                                 </td>
                                 <td className="p-4 whitespace-nowrap">
                                     <div className="flex items-center gap-2 text-slate-300">

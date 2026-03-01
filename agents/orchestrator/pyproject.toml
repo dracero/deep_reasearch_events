@@ -1,0 +1,15 @@
+[project]
+name = "orchestrator"
+version = "0.1.0"
+description = "BeeAI Orchestrator for A2A Agents"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.132.0",
+    "langchain-groq>=1.1.2",
+    "python-dotenv>=1.2.1",
+    "httpx>=0.27.0",
+    "uvicorn>=0.41.0",
+    "beeai-framework",
+    "a2a-sdk[all]"
+]

@@ -31,11 +31,12 @@ class EventInfo(BaseModel):
     """Structured info about a single event."""
     evento: str = Field(description="Nombre del evento")
     categoria: str = Field(description="Categoría: Deportes / Streaming / Gaming / Especiales")
+    proveedor: str = Field(default="No especificado", description="Empresa/proveedor a cargo del evento (ej: Netflix, Disney+, Steam, AFA, ESPN, etc)")
     fecha: str = Field(description="Fecha del evento (YYYY-MM-DD)")
-    hora_argentina: str = Field(description="Hora en Argentina (HH:MM ART), o 'A confirmar' si no se conoce")
-    descripcion: str = Field(description="Breve descripción del evento")
-    impacto_estimado: str = Field(description="Impacto estimado en tráfico: Alto / Medio / Bajo")
-    fuente: str = Field(description="URL o fuente de la información")
+    hora_argentina: str = Field(default="A confirmar", description="Hora en Argentina (HH:MM ART), o 'A confirmar' si no se conoce")
+    descripcion: str = Field(default="", description="Breve descripción del evento")
+    impacto_estimado: str = Field(default="Medio", description="Impacto estimado en tráfico: Alto / Medio / Bajo")
+    fuente: str = Field(default="", description="URL o fuente de la información")
 
 
 class ResearchFindings(BaseModel):

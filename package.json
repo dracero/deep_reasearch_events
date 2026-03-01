@@ -3,9 +3,11 @@
   "version": "1.0.0",
   "description": "Full stack deep research application",
   "scripts": {
-    "dev:backend": "cd backend && uv run uvicorn server:app --reload --port 8000",
+    "dev:orchestrator": "cd agents/orchestrator && uv run uvicorn server:app --reload --port 8000",
+    "dev:eventos": "cd agents/agent_eventos && uv run uvicorn server:app --reload --port 8001",
+    "dev:viajes": "cd agents/agent_viajes && uv run uvicorn server:app --reload --port 8002",
     "dev:frontend": "cd frontend && npm run dev",
-    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\""
+    "dev": "concurrently \"npm run dev:orchestrator\" \"npm run dev:eventos\" \"npm run dev:viajes\" \"npm run dev:frontend\""
   },
   "devDependencies": {
     "concurrently": "^8.2.2"
