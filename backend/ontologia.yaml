@@ -1,0 +1,254 @@
+##############################################################################
+# ONTOLOGÍA DE EVENTOS — Deep Research Argentina
+# Reglas de negocio para filtrado y clasificación de eventos que generan
+# tráfico de internet en Argentina.
+#
+# Este archivo es la fuente de verdad para los prompts y el grafo LangGraph.
+# Modificá este archivo para cambiar el comportamiento del agente.
+##############################################################################
+
+version: "1.0"
+descripcion: >
+  Define qué eventos son relevantes para el análisis de tráfico de internet
+  en Argentina. El criterio central es: ¿este evento va a hacer que muchos
+  argentinos abran sus navegadores, apps de streaming, juegos online o redes
+  sociales al mismo tiempo?
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CATEGORÍAS Y SUBCATEGORÍAS
+# ─────────────────────────────────────────────────────────────────────────────
+categorias:
+
+  deportes:
+    descripcion: >
+      Eventos deportivos transmitidos por streaming o TV online que generen
+      audiencia masiva en Argentina.
+    incluir:
+      futbol_argentino:
+        descripcion: Torneos del fútbol argentino
+        torneos_validos:
+          - "Liga Profesional de Fútbol (LPF) — Primera División Argentina"
+          - "Copa Argentina"
+          - "Copa de la Liga Profesional"
+          - "Torneo de Verano / Pretemporada oficial AFA"
+        equipos_referencia:
+          - River Plate
+          - Boca Juniors
+          - Racing Club
+          - Independiente
+          - San Lorenzo
+          - Huracán
+          - Vélez Sársfield
+          - Estudiantes de La Plata
+          - Lanús
+          - Defensa y Justicia
+          - Talleres (Córdoba)
+          - Belgrano
+          - Atlético Tucumán
+          - Godoy Cruz
+          - Rosario Central
+          - Newell's Old Boys
+          - Banfield
+          - Arsenal (Sarandí)
+          - Platense
+          - Tigre
+          - Barracas Central
+          - Riestra
+          - Gimnasia (La Plata)
+          - Instituto
+        nota: >
+          Solo partidos de equipos de la Primera División. NO incluir Segunda
+          División (Primera Nacional) ni ligas del ascenso.
+
+      copas_internacionales_argentina:
+        descripcion: >
+          Participación de equipos argentinos en torneos internacionales.
+        torneos_validos:
+          - "Copa Libertadores (CONMEBOL)"
+          - "Copa Sudamericana (CONMEBOL)"
+          - "Recopa Sudamericana"
+          - "Copa Intercontinental / Mundial de Clubes"
+        criterio: >
+          Al menos un equipo debe ser argentino. Si la fase es grupal,
+          considerar impacto Medio. Si es octavos en adelante, impacto Alto.
+
+      seleccion_argentina:
+        descripcion: Partidos de cualquier selección nacional argentina
+        modalidades:
+          - "Selección Mayor (AFA)"
+          - "Sub-23 (Juegos Olímpicos o Preolímpico)"
+          - "Sub-20 (Mundial Sub-20, Sudamericano Sub-20)"
+          - "Sub-17 (Mundial Sub-17)"
+          - "Selección Femenina"
+        impacto_minimo: Alto
+        nota: >
+          Cualquier partido de la Selección Mayor es Alto impacto.
+          Las juveniles dependen de la fase del torneo.
+
+      deportistas_argentinos_internacionales:
+        descripcion: >
+          Deportistas argentinos compitiendo en eventos internacionales de
+          alta exposición.
+        ejemplos:
+          - "Franco Colapinto / cualquier piloto argentino en Fórmula 1"
+          - "Tenistas argentinos en Grand Slams (Roland Garros, Wimbledon, US Open, Australian Open)"
+          - "Boxeadores argentinos en peleas mundiales"
+          - "Jinetes/polo argentino en eventos internacionales top"
+        criterio: >
+          El deportista debe ser argentino Y competir en instancia importante
+          (cuartos de final en adelante, o ronda 3+ en Grand Slams).
+
+    excluir:
+      - >
+        Partidos de ligas extranjeras sin participación argentina:
+        Premier League, La Liga, Serie A, Bundesliga, Ligue 1, MLS, etc.
+      - >
+        Champions League, Europa League u otras copas europeas,
+        a menos que juegue un equipo argentino (extremadamente raro).
+      - "Deportes de nicho sin audiencia masiva en Argentina"
+      - "Partidos amistosos internacionales de selecciones que no sean Argentina"
+      - "Segunda División argentina (Primera Nacional) o categorías menores"
+
+  streaming:
+    descripcion: >
+      Estrenos de contenido en plataformas de video-on-demand que generen
+      picos de tráfico en Argentina.
+    plataformas_validas:
+      - Netflix
+      - Disney+
+      - Amazon Prime Video
+      - HBO Max / Max
+      - Star+ (fusionado con Disney+ en Argentina)
+      - Apple TV+
+      - Paramount+
+      - Peacock (cuando está disponible en LAT)
+      - Pluto TV
+      - Crunchyroll (para anime con gran base argentina)
+    tipos_contenido:
+      series:
+        incluir:
+          - "Temporadas nuevas de series con base de fans establecida en Argentina"
+          - "Series originales con campaña de marketing masiva en LatAm"
+          - "Finales de temporada de series populares"
+          - "Anime con masivo seguimiento regional (Attack on Titan, One Piece, etc.)"
+        impacto_estimacion:
+          alto: "Series globales top-10 Netflix, Disney+ originals de franquicias Marvel/Star Wars"
+          medio: "Series de nicho con fanbase consolidada, estrenos de plataformas menores"
+          bajo: "Estrenos sin campaña de marketing local"
+      peliculas:
+        incluir:
+          - "Películas de franquicias masivas: Marvel, DC, Star Wars, Pixar, DreamWorks"
+          - "Películas con lanzamiento simultáneo streaming + cine en Argentina"
+          - "Películas ganadoras de Óscar disponibles en streaming el mismo día"
+        excluir:
+          - "Películas de arte o festivales sin distribución masiva"
+          - "Documentales de nicho"
+    criterio_relevancia_argentina: >
+      El contenido debe estar disponible simultáneamente en Argentina o con
+      un delay máximo de 24hs respecto al lanzamiento global.
+
+  gaming:
+    descripcion: >
+      Eventos de videojuegos y esports que concentran tráfico online argentino.
+    esports:
+      incluir:
+        torneos:
+          - "League of Legends: LLA (Liga Latinoamérica), Worlds, MSI"
+          - "Valorant: VCT Americas, Champions"
+          - "Counter-Strike 2 (CS2): ESL Pro League, Major Championships"
+          - "Dota 2: The International, DPC"
+          - "Free Fire: FFWS (World Series), LAT Regional"
+          - "Rainbow Six Siege: SI (Six Invitational), LAT League"
+          - "Fortnite: FNCS (Champion Series) con representación LAT"
+          - "FIFA/EA FC: torneos regionales con equipos argentinos"
+        criterio: >
+          El torneo debe tener equipos latinoamericanos y/o argentinos, O
+          ser un torneo mundial de altísima escala (Worlds LoL, The International).
+      excluir:
+        - "Torneos de regiones sin relevancia para LAT (Corea, Europa sin transmisión española)"
+        - "Ligas amateur o universitarias"
+    lanzamientos_juegos:
+      incluir:
+        - "Juegos AAA de franquicias masivas (GTA, Call of Duty, FIFA/EA FC, FIFA, Fortnite season)"
+        - "Expansiones/updates mayores de juegos con millones de jugadores en LAT"
+        - "Early Access de juegos muy esperados (con campañas de pre-orden masivas)"
+      excluir:
+        - "Juegos indie sin distribución masiva"
+        - "DLCs menores o parches de balance"
+      plataformas_referencia:
+        - Steam
+        - PlayStation Network
+        - Xbox Game Pass
+        - Epic Games Store
+        - Nintendo eShop
+
+  especiales:
+    descripcion: >
+      Eventos únicos de gran magnitud global que generan audiencia enorme en Argentina.
+    incluir:
+      entretenimiento:
+        - "Premios Oscar (Academy Awards) — siempre Alto impacto"
+        - "Grammy Awards"
+        - "MTV VMAs / Latin VMAs"
+        - "Kids Choice Awards (alta audiencia infantil/juvenil)"
+        - "Super Bowl (show del medio tiempo + streaming del partido)"
+        - "Conciertos/shows en vivo de artistas con millones de fans en Argentina (Taylor Swift, Bad Bunny, etc.)"
+      eventos_tecnologicos:
+        - "Keynotes de Apple (iPhone, WWDC) — alto tráfico en tech media"
+        - "Google I/O"
+        - "State of Play PlayStation, Xbox Direct, Nintendo Direct"
+      eventos_culturales:
+        - "Lanzamientos de álbumes de artistas masivos con plataformas streaming"
+        - "Eventos virales programados (ej. transmisiones especiales)"
+    excluir:
+      - "Eventos políticos locales de otros países"
+      - "Ceremonias/premiaciones de nicho sin audiencia masiva"
+      - "Eventos sin transmisión por internet verificable"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ESCALA DE IMPACTO EN TRÁFICO ARGENTINO
+# ─────────────────────────────────────────────────────────────────────────────
+impacto:
+  Alto:
+    descripcion: "Millones de viewers/jugadores concurrentes en Argentina"
+    ejemplos:
+      - "Final Copa Libertadores con equipo argentino"
+      - "Partido de la Selección en Mundial o eliminatoria decisiva"
+      - "Estreno de nueva temporada de Stranger Things o serie top-5 Netflix"
+      - "Lanzamiento de GTA VI"
+      - "Premios Oscar"
+  Medio:
+    descripcion: "Cientos de miles de viewers/usuarios concurrentes en Argentina"
+    ejemplos:
+      - "Partido de la LPF entre Boca y River (Superclásico)"
+      - "Temporada nueva de serie con fans consolidados"
+      - "Torneo de esports regional (LLA, VCT Americas)"
+      - "Lanzamiento de Call of Duty nuevo"
+  Bajo:
+    descripcion: "Decenas de miles de viewers/usuarios concurrentes en Argentina"
+    ejemplos:
+      - "Partido de fase grupal de Libertadores de un equipo menor"
+      - "Estreno de película sin gran campaña en LAT"
+      - "Torneo de esports de nicho con algo de seguimiento local"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# REGLAS GLOBALES DE EXCLUSIÓN
+# ─────────────────────────────────────────────────────────────────────────────
+exclusiones_globales:
+  - "Eventos sin fecha/hora confirmada o estimable"
+  - "Eventos exclusivos de TV de cable sin streaming verificable"
+  - "Noticias o eventos que ya ocurrieron (más de 24hs en el pasado)"
+  - "Eventos de otros países sin participación argentina o sin audiencia probada en Argentina"
+  - >
+    Contenido paywalled sin acceso masivo (ej. DAZN en mercados donde no opera
+    en Argentina)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HORARIO DE REFERENCIA
+# ─────────────────────────────────────────────────────────────────────────────
+timezone:
+  argentina: "America/Argentina/Buenos_Aires"
+  offset_utc: "UTC-3 (ART, sin cambio horario)"
+  nota: >
+    Argentina NO tiene horario de verano. Siempre UTC-3.
+    Convertir siempre las horas a ART para el reporte final.

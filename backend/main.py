@@ -12,10 +12,13 @@ Usage:
 import json
 import logging
 import sys
+
+from dotenv import load_dotenv
+load_dotenv()
+
 from datetime import datetime, timedelta
 
 import pandas as pd
-from dotenv import load_dotenv
 from tabulate import tabulate
 
 from graph import build_graph
@@ -23,8 +26,6 @@ from graph import build_graph
 # ─────────────────────────────────────────────────────
 # Setup
 # ─────────────────────────────────────────────────────
-
-load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,

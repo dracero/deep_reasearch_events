@@ -1,3 +1,6 @@
+from dotenv import load_dotenv
+load_dotenv()
+
 import json
 import logging
 from typing import AsyncGenerator
@@ -13,9 +16,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | 
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Deep Research Argentina API")
-
-from dotenv import load_dotenv
-load_dotenv()
 
 # Enable CORS for the React frontend
 app.add_middleware(

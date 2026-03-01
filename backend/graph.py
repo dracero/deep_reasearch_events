@@ -23,11 +23,17 @@ Architecture:
 
 import json
 import logging
+import time
+from pathlib import Path
 from typing import List
 
-from langchain_google_genai import ChatGoogleGenerativeAI
+import os
+import yaml
+from groq import RateLimitError
+from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
+from langsmith import traceable
 from tavily import TavilyClient
 
 from state import (
@@ -49,14 +55,55 @@ from prompts import (
 logger = logging.getLogger(__name__)
 
 # ─────────────────────────────────────────────────────
+# Ontología de reglas de negocio
+# ─────────────────────────────────────────────────────
+
+_ONTOLOGIA_PATH = Path(__file__).parent / "ontologia.yaml"
+
+def _load_ontologia() -> dict:
+    """Load business rules ontology from YAML file."""
+    try:
+        with open(_ONTOLOGIA_PATH, encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    except Exception as e:
+        logger.warning(f"Could not load ontologia.yaml: {e}")
+        return {}
+
+
+# ─────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────
 
-def _get_llm(model_name: str, temperature: float = 0.0) -> ChatGoogleGenerativeAI:
+def _get_llm(model_name: str, temperature: float = 0.0) -> ChatGroq:
     """Create an LLM instance."""
-    return ChatGoogleGenerativeAI(model=model_name, temperature=temperature)
+    return ChatGroq(
+        model=model_name,
+        api_key=os.getenv("GROQ_API_KEY"),
+        temperature=temperature,
+        max_retries=0,  # We handle retries manually with backoff
+    )
 
 
+def _invoke_with_backoff(chain, messages: list, max_attempts: int = 5):
+    """Invoke a LangChain chain with exponential backoff on 429 rate limit errors."""
+    delay = 5.0
+    for attempt in range(max_attempts):
+        try:
+            return chain.invoke(messages)
+        except RateLimitError as e:
+            if attempt == max_attempts - 1:
+                raise
+            logger.warning(
+                f"Rate limit hit (attempt {attempt + 1}/{max_attempts}). "
+                f"Waiting {delay:.1f}s before retry..."
+            )
+            time.sleep(delay)
+            delay = min(delay * 2, 60.0)  # Cap at 60s
+        except Exception:
+            raise
+
+
+@traceable(name="tavily_search", run_type="tool")
 def _tavily_search(query: str, config: Configuration) -> List[dict]:
     """Execute a single Tavily search and return results."""
     client = TavilyClient()
@@ -90,10 +137,13 @@ def plan_research(state: AgentState) -> dict:
     )
 
     structured_llm = llm.with_structured_output(SearchPlan)
-    plan: SearchPlan = structured_llm.invoke([
-        {"role": "system", "content": prompt},
-        {"role": "user", "content": user_msg},
-    ])
+    plan: SearchPlan = _invoke_with_backoff(
+        structured_llm,
+        [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": user_msg},
+        ],
+    )
 
     logger.info(f"📋 Plan generated: {len(plan.queries)} queries")
     return {"search_plan": plan}
@@ -135,10 +185,13 @@ def research_category(state: ResearcherState) -> dict:
     structured_llm = llm.with_structured_output(ResearchFindings)
 
     try:
-        findings: ResearchFindings = structured_llm.invoke([
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": f"Resultados de búsqueda:\n\n{search_context}"},
-        ])
+        findings: ResearchFindings = _invoke_with_backoff(
+            structured_llm,
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": f"Resultados de búsqueda:\n\n{search_context}"},
+            ],
+        )
         events = [event.model_dump() for event in findings.events]
         logger.info(f"✅ [{category}] Extracted {len(events)} events")
         return {"raw_events": events}
@@ -220,10 +273,13 @@ def filter_argentina(state: AgentState) -> dict:
     events_json = json.dumps(raw, ensure_ascii=False, indent=2)
 
     try:
-        report: FilteredReport = structured_llm.invoke([
-            {"role": "system", "content": FILTER_SYSTEM_PROMPT},
-            {"role": "user", "content": f"Eventos a filtrar:\n\n{events_json}"},
-        ])
+        report: FilteredReport = _invoke_with_backoff(
+            structured_llm,
+            [
+                {"role": "system", "content": FILTER_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Eventos a filtrar:\n\n{events_json}"},
+            ],
+        )
         filtered = [e.model_dump() for e in report.events]
         logger.info(f"🇦🇷 Filtered to {len(filtered)} Argentina-relevant events")
         return {"filtered_events": filtered}
@@ -249,10 +305,13 @@ def generate_report(state: AgentState) -> dict:
 
     events_json = json.dumps(filtered, ensure_ascii=False, indent=2)
 
-    response = llm.invoke([
-        {"role": "system", "content": REPORT_SYSTEM_PROMPT},
-        {"role": "user", "content": f"Eventos filtrados:\n\n{events_json}"},
-    ])
+    response = _invoke_with_backoff(
+        llm,
+        [
+            {"role": "system", "content": REPORT_SYSTEM_PROMPT},
+            {"role": "user", "content": f"Eventos filtrados:\n\n{events_json}"},
+        ],
+    )
 
     report_text = response.content.strip()
 

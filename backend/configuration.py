@@ -14,19 +14,19 @@ class Configuration(BaseModel):
 
     # ── LLM Models ──────────────────────────────────────────
     planner_model: str = Field(
-        default="gemini-2.5-flash",
+        default="meta-llama/llama-4-scout-17b-16e-instruct",
         description="Model for generating search plans.",
     )
     researcher_model: str = Field(
-        default="gemini-2.5-flash",
+        default="meta-llama/llama-4-scout-17b-16e-instruct",
         description="Model for analysing search results.",
     )
     filter_model: str = Field(
-        default="gemini-2.5-flash",
+        default="meta-llama/llama-4-scout-17b-16e-instruct",
         description="Model for filtering events by Argentina relevance.",
     )
     report_model: str = Field(
-        default="gemini-2.5-flash",
+        default="meta-llama/llama-4-scout-17b-16e-instruct",
         description="Model for generating the final structured report.",
     )
 
