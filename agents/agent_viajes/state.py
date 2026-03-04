@@ -14,6 +14,32 @@ from typing_extensions import TypedDict
 # Structured Outputs (LLM responses)
 # ─────────────────────────────────────
 
+class ClarifyDecision(BaseModel):
+    """Decisión estructurada sobre si faltan datos críticos para buscar viajes."""
+    need_clarification: bool = Field(
+        description="True si falta información crítica (destino o fechas de viaje) que NO se puede extraer del mensaje"
+    )
+    question: str = Field(
+        default="",
+        description="Pregunta al usuario si need_clarification=True. Vacío si no hace falta preguntar."
+    )
+    missing_fields: List[str] = Field(
+        default_factory=list,
+        description="Lista de campos que realmente faltan después de analizar el mensaje: 'destination', 'travel_dates'."
+    )
+    extracted_origin: str = Field(
+        default="",
+        description="Origen extraído del mensaje del usuario (ej: 'Buenos Aires'). Vacío si no se menciona."
+    )
+    extracted_destination: str = Field(
+        default="",
+        description="Destino extraído del mensaje del usuario (ej: 'Bariloche', 'Miami'). Vacío si no se menciona."
+    )
+    extracted_travel_dates: str = Field(
+        default="",
+        description="Fechas de viaje extraídas del mensaje (ej: '15 de junio', '2026-06-15 al 2026-07-05'). Vacío si no se mencionan."
+    )
+
 class FlightQuery(BaseModel):
     """Una query de búsqueda para Tavily orientada a vuelos."""
     query: str = Field(description="Search query optimizada para encontrar vuelos/precios.")

@@ -9,10 +9,10 @@ El proyecto se divide en 3 bloques principales: Frontend, Orchestrator y Microse
 Actúa como un "Router" Inteligente (usando `llama-3.3-70b-versatile` de Groq). Interpreta la intención semántica del usuario y decide si delegar la tarea al **Agente de Eventos**, al **Agente de Viajes** o de forma concurrente a **ambos**. Usa el framework BeeAI apoyado en el SDK de cliente de A2A para llamar unificadamente a cada servicio.
 
 **2. Agent Eventos (A2A Server, LangGraph)**
-Se encarga de rastrear eventos clave (deportes, streamings, gaming) en la red para una fecha u objetivo determinado, utilizando `Tavily Search`. Aplica una ontología de negocios para acortar solo eventos relevantes a la Argentina. Transmite componentes de carga y recolección de eventos en vivo a la web.
+Se encarga de rastrear eventos clave (deportes, streamings, gaming) en la red para una fecha u objetivo determinado, utilizando `DuckDuckGo Search` (gratuito y sin API Key). Aplica una ontología de negocios para acortar solo eventos relevantes a la Argentina. Transmite componentes de carga y recolección de eventos en vivo a la web.
 
 **3. Agent Viajes (A2A Server, LangGraph)**
-Recibe un origen, destino y fecha. Se encarga de ensamblar planes de transporte e itinerarios mediante búsquedas precisas (Tavily/Vuelos). Envía resultados listos para consumirse visualmente en forma de opciones tabulares.
+Recibe un origen, destino y fecha. Se encarga de ensamblar planes de transporte e itinerarios mediante búsquedas precisas (DuckDuckGo Search/Vuelos). Envía resultados listos para consumirse visualmente en forma de opciones tabulares.
 
 **4. Frontend (React + Vite)**
 Aplicación web moderna responsable de decodificar flujos asíncronos en texto plano (SSE) y transformarlos de inmediato en componentes (A2UI). 
@@ -36,8 +36,8 @@ graph TD
     LLM_Router -->|"Ambos simultáneo"| AV
     
     subgraph Microservicios Especiales A2A
-    AE -->|"Agent Graph"| T_AE["Tavily Search API"]
-    AV -->|"Agent Graph"| T_AV["Tavily Search API"]
+    AE -->|"Agent Graph"| T_AE["DuckDuckGo Search"]
+    AV -->|"Agent Graph"| T_AV["DuckDuckGo Search"]
     end
     
     AE -.->|"Protocolo A2A Schema / Stream"| O
@@ -95,7 +95,6 @@ cp .env.example .env
 ```
 Abre el archivo `.env` recién creado y actualiza con tus *API Keys* reales:
 - **`GROQ_API_KEY`**: Para los modelos LLM subyacentes de ultra-velocidad (Ej. `llama-3.3-70b-versatile` / `llama-4-scout-17b-16e-instruct`).
-- **`TAVILY_API_KEY`**: Para la búsqueda de investigación a través de la web en tiempo real.
 - **`LANGSMITH_*`** *(opcional)*: Para dar trazabilidad al grafo si deseas inspeccionar los calls internos de langchain.
 
 > **Importante:** El modelo gratuito ("on demand") de Groq tiene límites de Requests (Rate Limits). Los grafos implementan internamente un `Exponential Backoff Timeout Retry` y el cliente manda latidos (*heartbeats*) a la UI por SSE si hay cortes para mantener la conexión viva del browser de manera inteligente.

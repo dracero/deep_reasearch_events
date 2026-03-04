@@ -62,17 +62,17 @@ class TravelAgentExecutor(AgentExecutor):
                 end_idx = user_message.rfind("}") + 1
                 json_str = user_message[start_idx:end_idx]
                 params = json.loads(json_str)
-                origin = params.get("origin", "Buenos Aires")
-                destination = params.get("destination", "Mundial 2026 USA")
-                travel_dates = params.get("travel_dates", "2026-06-15 al 2026-07-05")
+                origin = params.get("origin", "")
+                destination = params.get("destination", "")
+                travel_dates = params.get("travel_dates", "")
             else:
-                origin = "Buenos Aires"
-                destination = "Mundial 2026 USA"
-                travel_dates = "2026-06-15 al 2026-07-05"
+                origin = ""
+                destination = ""
+                travel_dates = ""
         except Exception:
-            origin = "Buenos Aires"
-            destination = "Mundial 2026 USA"
-            travel_dates = "2026-06-15 al 2026-07-05"
+            origin = ""
+            destination = ""
+            travel_dates = ""
 
         initial_state = {
             "origin": origin,
@@ -93,9 +93,10 @@ class TravelAgentExecutor(AgentExecutor):
             # Execute LangGraph and stream intermediate steps as Artifacts
             async for event in graph.astream(initial_state, stream_mode="updates"):
                 # --- clarify Node: stream question to the user as a chat message ---
-                if "clarify" in event:
+                if "clarify" in event and event["clarify"] is not None:
                     question = event["clarify"].get("clarify_question", "")
                     if question:
+                        # Stream the question to the user as a UI component
                         await event_queue.enqueue_event(
                             TaskArtifactUpdateEvent(
                                 task_id=task_id,
@@ -112,6 +113,16 @@ class TravelAgentExecutor(AgentExecutor):
                                 ),
                             )
                         )
+                        # Signal input_required so the frontend knows to wait for user answer
+                        await event_queue.enqueue_event(
+                            TaskStatusUpdateEvent(
+                                task_id=task_id,
+                                context_id=context_id,
+                                status=TaskStatus(state=TaskState.input_required),
+                                final=True,
+                            )
+                        )
+                        return  # Stop execution until the user responds
 
                 # --- rank_and_optimize Node ---
                 if "rank_and_optimize" in event:

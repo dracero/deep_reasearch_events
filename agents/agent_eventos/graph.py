@@ -9,10 +9,13 @@ Architecture:
   plan_research ──► Generates search queries per category
        │
        ▼ (Send to parallel researchers)
-  research_category ──► Tavily search + LLM extraction (×4 categories)
+  research_category ──► Tavily/DDG search + LLM extraction (×4 categories)
        │
        ▼
   aggregate_results ──► Combine all events
+       │
+       ▼
+  verify_dates ──► Scrape sources to verify dates
        │
        ▼
   filter_argentina ──► Keep only Argentina-relevant events
@@ -36,15 +39,20 @@ from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 from langsmith import traceable
-from tavily import TavilyClient
 import httpx
 from bs4 import BeautifulSoup
-try:
-    from playwright.async_api import async_playwright
-except ImportError:
-    async_playwright = None
 
 from duckduckgo_search import DDGS
+
+# Optional: Tavily for better search quality
+try:
+    from tavily import TavilyClient
+    _HAS_TAVILY = bool(os.getenv("TAVILY_API_KEY"))
+except ImportError:
+    _HAS_TAVILY = False
+
+# Firecrawl API key for fallback scraping (optional)
+_FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
 
 from state import (
     AgentState,
@@ -90,79 +98,105 @@ def _get_llm(model_name: str, temperature: float = 0.0) -> ChatGroq:
         model=model_name,
         api_key=os.getenv("GROQ_API_KEY"),
         temperature=temperature,
-        max_retries=0,  # We handle retries manually with backoff
+        max_retries=0,
     )
 
 
-async def _invoke_with_backoff(chain, messages: list, max_attempts: int = 5):
+# Global semaphore to limit concurrent Groq API calls (prevents 429 storms
+# when multiple researchers run in parallel).
+_GROQ_SEMAPHORE = asyncio.Semaphore(2)
+_GROQ_COOLDOWN = 1.5  # seconds between consecutive API calls
+
+
+async def _invoke_with_backoff(chain, messages: list, max_attempts: int = 6, pydantic_schema=None):
     """Invoke a LangChain chain with exponential backoff on 429 rate limit errors.
     If a daily token limit is hit (TPD), fallback to a secondary model.
+    Uses a global semaphore to limit concurrent Groq API calls.
     """
-    delay = 5.0
+    import random
+
+    _DAILY_KEYWORDS = [
+        "rate limit reached", "tokens per day", "requests per day",
+        "tpd", "rpd"
+    ]
+    # Fallback models to try (each has its own TPD limit on Groq)
+    _FALLBACK_MODELS = [
+        "llama-3.1-8b-instant",
+        "qwen/qwen3-32b"
+    ]
+
+    delay = 4.0
     for attempt in range(max_attempts):
         try:
-            # Run the synchronous chain.invoke in a thread so the event loop stays free
-            return await asyncio.get_event_loop().run_in_executor(None, chain.invoke, messages)
+            async with _GROQ_SEMAPHORE:
+                result = await asyncio.get_event_loop().run_in_executor(None, chain.invoke, messages)
+                await asyncio.sleep(_GROQ_COOLDOWN)  # cooldown between calls
+                return result
         except RateLimitError as e:
             error_msg = str(e).lower()
-            # If the limit is daily tokens (TPD) or a huge wait time, fallback immediately
-            if 'tokens per day' in error_msg or 'tpd' in error_msg:
-                logger.warning("Daily Token Limit hit! Falling back to secondary model 'llama-3.3-70b-versatile'.")
-                # Dynamically build a fallback chain matching the original structure
-                fallback_llm = _get_llm("llama-3.3-70b-versatile")
-                
-                # Check if the original chain had a structured output schema attached
-                if hasattr(chain, 'bound') and hasattr(chain, 'kwargs') and 'response_format' in chain.kwargs:
-                    # It's an LLM with structured output, unfortunately we don't have the explicit Pydantic class here easily
-                    # Try to see if it's stored in the kwargs or mapper
-                    raise Exception(f"RateLimitError on structured LLM, requires manual schema rescue: {e}")
-                
-                # Simple LLM fallback (like the planner or report generator)
+
+            # ── Daily limit hit (TPD or RPD) ─────────────────────────────────
+            if any(kw in error_msg for kw in _DAILY_KEYWORDS):
+                limit_type = "RPD" if ("requests per day" in error_msg or "rpd" in error_msg) else "TPD"
+                logger.warning(f"⛔ {limit_type} limit hit on primary model!")
+
+                # Try each fallback model (they have separate TPD limits)
+                for fb_model in _FALLBACK_MODELS:
+                    logger.warning(f"🔄 Trying fallback model: {fb_model}")
+                    fallback_llm = _get_llm(fb_model)
+                    fallback_chain = (
+                        fallback_llm.with_structured_output(pydantic_schema)
+                        if pydantic_schema else fallback_llm
+                    )
+                    try:
+                        async with _GROQ_SEMAPHORE:
+                            result = await asyncio.get_event_loop().run_in_executor(None, fallback_chain.invoke, messages)
+                            await asyncio.sleep(_GROQ_COOLDOWN)
+                            return result
+                    except Exception as fallback_e:
+                        logger.warning(f"Fallback {fb_model} also failed: {fallback_e}")
+                        continue
+
+                # All fallbacks exhausted — wait and retry original
+                logger.warning(f"⏳ All fallback models exhausted. Waiting 60s before retrying...")
+                await asyncio.sleep(60)
                 try:
-                    # Si era with_structured_output, chain es un RunnableBinding o RunnableMap. 
-                    # Intentamos reconstruirlo suciamente copiando el step pero es complejo.
-                    # Mejor fallback temporal para LLM simple:
-                    return await asyncio.get_event_loop().run_in_executor(None, fallback_llm.invoke, messages)
-                except Exception as fallback_e:
-                    logger.error(f"Fallback model also failed: {fallback_e}")
+                    async with _GROQ_SEMAPHORE:
+                        result = await asyncio.get_event_loop().run_in_executor(None, chain.invoke, messages)
+                        await asyncio.sleep(_GROQ_COOLDOWN)
+                        return result
+                except Exception:
                     raise e
-                    
+
+            # ── RPM / TPM — transient, worth retrying ────────────────────────
             if attempt == max_attempts - 1:
+                logger.error(f"Rate limit persisted after {max_attempts} attempts. Giving up.")
                 raise
+
+            jitter = random.uniform(0, delay * 0.5)
+            wait = delay + jitter
             logger.warning(
-                f"Rate limit hit (attempt {attempt + 1}/{max_attempts}). "
-                f"Waiting {delay:.1f}s before retry..."
+                f"⏳ Rate limit hit (attempt {attempt + 1}/{max_attempts}). "
+                f"Waiting {wait:.1f}s before retry..."
             )
-            await asyncio.sleep(delay)  # Non-blocking wait
-            delay = min(delay * 2, 60.0)  # Cap at 60s
-        except Exception:
-            raise
+            await asyncio.sleep(wait)
+            delay = min(delay * 2, 60.0)
 
 
 def _parse_failed_generation(error, pydantic_model):
-    """Extract and parse the 'failed_generation' JSON from a Groq 400 tool_use_failed error.
-
-    Groq sometimes returns valid JSON but fails to invoke the function/tool properly,
-    resulting in a 400 Bad Request with the actual data inside 'failed_generation'.
-    This helper rescues that data and constructs the Pydantic model manually.
-
-    Returns the parsed Pydantic model instance, or None if parsing fails.
-    """
+    """Extract and parse the 'failed_generation' JSON from a Groq 400 tool_use_failed error."""
     error_str = str(error)
     if 'tool_use_failed' not in error_str and 'failed_generation' not in error_str:
         return None
 
-    # Try to extract the failed_generation JSON from the error body
     failed_json_str = None
 
-    # Method 1: If the error has a .body dict (groq / openai SDK errors)
     if hasattr(error, 'body') and isinstance(error.body, dict):
         err_detail = error.body.get('error', {})
         failed_json_str = err_detail.get('failed_generation')
 
-    # Method 2: Regex extraction from the string representation
     if not failed_json_str:
-        match = re.search(r"'failed_generation':\s*'(.*)'\}\}$", error_str, re.DOTALL)
+        match = re.search(r"'failed_generation':\s*'(.*)'}}$", error_str, re.DOTALL)
         if match:
             failed_json_str = match.group(1)
 
@@ -170,7 +204,6 @@ def _parse_failed_generation(error, pydantic_model):
         logger.warning("Could not extract failed_generation from error.")
         return None
 
-    # Clean markdown fences if present
     failed_json_str = failed_json_str.strip()
     if failed_json_str.startswith('```'):
         lines = failed_json_str.split('\n')
@@ -183,25 +216,16 @@ def _parse_failed_generation(error, pydantic_model):
         logger.warning(f"failed_generation is not valid JSON: {failed_json_str[:200]}")
         return None
 
-    # The data might be in several formats Groq produces:
-    #   1. A flat list of event dicts  →  wrap as {"events": data}
-    #   2. A list containing one object with "events" key  →  unwrap
-    #   3. A dict with "events" key directly  →  use as-is
-    #   4. Tool-call wrapper: [{"name": "...", "parameters": {"events": [...]}}]  →  extract parameters
     try:
         if isinstance(data, list):
-            # Format 4: Tool-call wrapper [{"name": "...", "parameters": {...}}]
             if len(data) > 0 and isinstance(data[0], dict) and 'name' in data[0] and 'parameters' in data[0]:
-                # Extract from tool-call envelope
                 params = data[0].get('parameters', {})
                 if isinstance(params, dict) and 'events' in params:
                     data = params
                 else:
                     data = {'events': []}
                 logger.info(f"Extracted data from tool-call wrapper format")
-            # Format 2: [{\"events\": [...], \"notes\": \"...\"}]
             elif len(data) > 0 and isinstance(data[0], dict) and 'events' in data[0]:
-                # Merge all events from wrapper objects
                 all_events = []
                 notes = ""
                 for item in data:
@@ -210,7 +234,6 @@ def _parse_failed_generation(error, pydantic_model):
                         notes = item['notes']
                 data = {'events': all_events, 'notes': notes}
             else:
-                # Format 1: flat list of event dicts
                 data = {'events': data}
 
         result = pydantic_model.model_validate(data)
@@ -221,116 +244,238 @@ def _parse_failed_generation(error, pydantic_model):
         return None
 
 
+# ─────────────────────────────────────────────────────
+# Search: Tavily (primary) + DuckDuckGo (fallback)
+# ─────────────────────────────────────────────────────
+
 @traceable(name="tavily_search", run_type="tool")
 def _tavily_search(query: str, config: Configuration, include_domains: list[str] | None = None) -> List[dict]:
-    """Execute a single Tavily search and return results. Falls back to DuckDuckGo on error."""
-    client = TavilyClient()
-    try:
-        kwargs = dict(
-            query=query,
-            max_results=config.tavily_max_results,
-            search_depth=config.tavily_search_depth,
-            include_answer=True,
-        )
-        if include_domains:
-            kwargs["include_domains"] = include_domains
-        response = client.search(**kwargs)
-        return response.get("results", [])
-    except Exception as e:
-        logger.warning(f"Tavily search failed for '{query}': {e}. Falling back to DuckDuckGo.")
+    """Execute a single Tavily search. Falls back to DuckDuckGo on error."""
+    if _HAS_TAVILY:
         try:
-            ddgs = DDGS()
-            # If include_domains is provided, we can append 'site:domain1 OR site:domain2' to the query
-            ddgs_query = query
+            client = TavilyClient()
+            kwargs = dict(
+                query=query,
+                max_results=config.tavily_max_results,
+                search_depth=config.tavily_search_depth,
+                include_answer=True,
+            )
             if include_domains:
-                site_query = " OR ".join([f"site:{d}" for d in include_domains])
-                ddgs_query = f"{query} ({site_query})"
-            
-            results = ddgs.text(ddgs_query, max_results=config.tavily_max_results)
-            # Map DDGS results to Tavily format
-            formatted_results = []
-            for r in results:
-                formatted_results.append({
-                    "title": r.get("title", ""),
-                    "url": r.get("href", ""),
-                    "content": r.get("body", "")
-                })
-            return formatted_results
-        except Exception as fallback_e:
-            logger.error(f"DuckDuckGo fallback also failed for '{query}': {fallback_e}")
-            return []
+                kwargs["include_domains"] = include_domains
+            response = client.search(**kwargs)
+            return response.get("results", [])
+        except Exception as e:
+            logger.warning(f"Tavily search failed for '{query}': {e}. Falling back to DuckDuckGo.")
+
+    # DuckDuckGo fallback (or primary if no Tavily key)
+    return _ddg_search(query, config, include_domains)
 
 
-# Dominios SPA que requieren JS rendering para contenido actualizado
-_EVENTOS_SPA_DOMAINS = [
-    "netflix.com", "disneyplus.com", "hbomax.com", "max.com",
-    "primevideo.com", "twitch.tv", "store.steampowered.com",
-    "paramountplus.com", "star-plus.com", "apple.com/tv",
+@traceable(name="ddg_search", run_type="tool")
+def _ddg_search(query: str, config: Configuration, include_domains: list[str] | None = None) -> List[dict]:
+    """Execute a DuckDuckGo search and return formatted results."""
+    try:
+        from langchain_community.tools import DuckDuckGoSearchResults
+        from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
+
+        ddgs_query = query
+        if include_domains:
+            site_query = " OR ".join([f"site:{d}" for d in include_domains])
+            ddgs_query = f"{query} ({site_query})"
+
+        wrapper = DuckDuckGoSearchAPIWrapper(max_results=config.search_max_results)
+        search = DuckDuckGoSearchResults(api_wrapper=wrapper, output_format="list")
+        res = search.invoke(ddgs_query)
+
+        formatted_results = []
+        for r in res:
+            formatted_results.append({
+                "title": r.get("title", ""),
+                "url": r.get("link", ""),
+                "content": r.get("snippet", "")
+            })
+        return formatted_results
+    except Exception as e:
+        logger.error(f"DuckDuckGo search failed for '{query}': {e}")
+        return []
+
+
+# ─────────────────────────────────────────────────────
+# Sitios y configuración de búsqueda
+# ─────────────────────────────────────────────────────
+
+# Dominios para DuckDuckGo (site: restricciones)
+SITES_DDG = [
+    "netflix.com",
+    "disneyplus.com",
+    "primevideo.com",
+    "max.com",
+    "paramountplus.com",
+    "apple.com/apple-tv-plus",
+    "ole.com.ar",
+    "espndeportes.espn.com",
+    "eventick.com.ar",
 ]
 
-async def _async_scrape_spa_evento(url: str, timeout: int = 15000) -> str:
-    """Playwright async scraper for SPA event sites (Netflix, Disney+, Twitch, etc.)"""
-    if not async_playwright:
+# URLs a scrapear directamente con Firecrawl (o Jina como fallback)
+# Cada entrada: { "nombre", "url", "categoria" }
+FIRECRAWL_TARGETS = [
+    {
+        "nombre":    "Netflix Novedades",
+        "url":       "https://www.netflix.com/ar/whats-new",
+        "categoria": "streaming",
+    },
+    {
+        "nombre":    "Disney+ Estrenos",
+        "url":       "https://www.disneyplus.com/es-419/movies",
+        "categoria": "streaming",
+    },
+    {
+        "nombre":    "Prime Video Novedades",
+        "url":       "https://www.primevideo.com/-/es/storefront/home",
+        "categoria": "streaming",
+    },
+    {
+        "nombre":    "ESPN Deportes",
+        "url":       "https://www.espn.com.ar/programacion/",
+        "categoria": "deportes",
+    },
+    {
+        "nombre":    "Ole Deportes",
+        "url":       "https://www.ole.com.ar/futbol-en-vivo/",
+        "categoria": "deportes",
+    },
+    {
+        "nombre":    "Promiedos Primera División",
+        "url":       "https://www.promiedos.com.ar/primera",
+        "categoria": "deportes",
+    },
+]
+
+QUERIES_BASE = [
+    "estrenos fecha hora estreno",
+    "nuevos lanzamientos calendario",
+    "próximos estrenos 2025",
+]
+MAX_RESULTS_PER_QUERY = 5
+
+# ─── Patrones regex para fecha y hora ─────────────────────────────────────────
+
+DATE_PATTERNS = [
+    r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b",
+    r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b",
+    r"\b(\d{1,2}\s+de\s+\w+\s+(?:de\s+)?\d{4})\b",
+    r"\b(\d{1,2}\s+\w+\s+\d{4})\b",
+    r"\b((?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre"
+    r"|january|february|march|april|may|june|july|august|september|october|november|december)"
+    r"\s+\d{4})\b",
+]
+TIME_PATTERNS = [
+    r"\b(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?)\b",
+    r"a\s+las\s+(\d{1,2}(?::\d{2})?)\s*h(?:s|oras?)?",
+]
+
+
+# ─────────────────────────────────────────────────────
+# SPA Scraping: Jina Reader (primary) + Firecrawl (fallback)
+# ─────────────────────────────────────────────────────
+
+
+async def _scrape_with_jina(url: str) -> str:
+    """Scrape a page using Jina Reader API (r.jina.ai).
+    Free, handles JS-rendered pages, returns clean markdown."""
+    jina_url = f"https://r.jina.ai/{url}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(
+                jina_url,
+                headers={
+                    "Accept": "text/plain",
+                    "X-No-Cache": "true",
+                },
+            )
+            resp.raise_for_status()
+            text = resp.text.strip()
+            if text and len(text) > 50:
+                return text[:5000]
+    except Exception as e:
+        logger.warning(f"Jina Reader failed for {url}: {e}")
+    return ""
+
+
+async def _scrape_with_firecrawl(url: str) -> str:
+    """Scrape a page using Firecrawl API (fallback).
+    Requires FIRECRAWL_API_KEY env var."""
+    if not _FIRECRAWL_API_KEY:
         return ""
-    # Use pinned Chromium binary that is confirmed to be installed
-    _CHROMIUM_EXEC = "/home/dracero/.cache/ms-playwright/chromium-1179/chrome-linux/chrome"
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=True,
-            executable_path=_CHROMIUM_EXEC if os.path.exists(_CHROMIUM_EXEC) else None,
-        )
-        try:
-            page = await browser.new_page()
-            await page.set_extra_http_headers({
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept-Language": "es-AR,es;q=0.9,en-US;q=0.8",
-            })
-            await page.goto(url, wait_until="networkidle", timeout=timeout)
-            await page.wait_for_timeout(3000)  # Wait for SPAs to finish async data fetch
-            html = await page.content()
-
-            soup = BeautifulSoup(html, "html.parser")
-            # Remove noise tags
-            for tag in soup(["script", "style", "nav", "footer", "header", "noscript", "iframe", "svg"]):
-                tag.decompose()
-
-            # For streaming platforms, look for content-rich sections
-            content_selectors = [
-                "[class*='title']", "[class*='release']", "[class*='date']",
-                "[class*='card']", "[class*='movie']", "[class*='series']",
-                "[class*='show']", "[class*='game']", "[class*='stream']",
-            ]
-            extracted_texts = []
-            for sel in content_selectors:
-                try:
-                    elements = soup.select(sel)
-                    for el in elements[:5]:  # Max 5 per selector
-                        text = el.get_text(separator=' ', strip=True)
-                        if len(text) > 10:
-                            extracted_texts.append(text)
-                except Exception:
-                    pass
-
-            if extracted_texts:
-                combined = ' | '.join(extracted_texts)
-            else:
-                combined = soup.get_text(separator=' ', strip=True)
-
-            return combined[:4000]
-        except Exception as e:
-            logger.warning(f"Playwright evento scrape error on {url}: {e}")
-            return ""
-        finally:
-            await browser.close()
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(
+                "https://api.firecrawl.dev/v1/scrape",
+                headers={
+                    "Authorization": f"Bearer {_FIRECRAWL_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "url": url,
+                    "formats": ["markdown"],
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            md = data.get("data", {}).get("markdown", "")
+            if md and len(md) > 50:
+                return md[:5000]
+    except Exception as e:
+        logger.warning(f"Firecrawl failed for {url}: {e}")
+    return ""
 
 
 async def _scrape_spa_evento(url: str) -> str:
-    """Wrapper that invokes Playwright SPA scraper."""
-    try:
-        return await _async_scrape_spa_evento(url)
-    except Exception as e:
-        logger.warning(f"SPA scrape failed for {url}: {e}")
-        return ""
+    """Scrape an SPA page using Jina Reader (primary) + Firecrawl (fallback)."""
+    text = await _scrape_with_jina(url)
+    if text:
+        logger.info(f"✅ Jina Reader scraped {url} ({len(text)} chars)")
+        return text
+
+    text = await _scrape_with_firecrawl(url)
+    if text:
+        logger.info(f"✅ Firecrawl scraped {url} ({len(text)} chars)")
+        return text
+
+    logger.warning(f"⚠️ Both Jina Reader and Firecrawl failed for {url}")
+    return ""
+
+
+# ─────────────────────────────────────────────────────
+# Firecrawl Target Scraping
+# ─────────────────────────────────────────────────────
+
+async def _scrape_firecrawl_targets(category: str) -> List[dict]:
+    """Scrape all FIRECRAWL_TARGETS matching the given category.
+    Uses Jina Reader (primary) + Firecrawl (fallback) and returns
+    results formatted like search results for the LLM."""
+    targets = [t for t in FIRECRAWL_TARGETS if t["categoria"] == category]
+    if not targets:
+        return []
+
+    results = []
+    for target in targets:
+        url = target["url"]
+        nombre = target["nombre"]
+        logger.info(f"🔥 [{category}] Scraping Firecrawl target: {nombre} ({url})")
+        text = await _scrape_spa_evento(url)
+        if text:
+            results.append({
+                "title": nombre,
+                "url": url,
+                "content": text,
+            })
+            logger.info(f"✅ [{category}] Firecrawl target '{nombre}': {len(text)} chars")
+        else:
+            logger.warning(f"⚠️ [{category}] Firecrawl target '{nombre}' returned no content")
+
+    return results
 
 
 # ─────────────────────────────────────────────────────
@@ -368,6 +513,7 @@ async def plan_research(state: AgentState) -> dict:
             {"role": "system", "content": prompt},
             {"role": "user", "content": user_msg},
         ],
+        pydantic_schema=SearchPlan,
     )
 
     logger.info(f"📋 Plan generated: {len(plan.queries)} queries")
@@ -379,16 +525,13 @@ async def plan_research(state: AgentState) -> dict:
 # ─────────────────────────────────────────────────────
 
 async def research_category(state: ResearcherState) -> dict:
-    """Search with Tavily and extract events for a category."""
+    """Search with Tavily/DDG and extract events for a category."""
     config = Configuration.from_env()
     llm = _get_llm(config.researcher_model)
     category = state["category"]
     target_date = state["target_date"]
     queries = state["queries"]
 
-    # Define domains per category for Tavily's include_domains filter.
-    # NOTE: For streaming, we use entertainment NEWS sites (not the platforms
-    # themselves) because netflix.com/disneyplus.com are apps, not article sites.
     _CATEGORY_DOMAINS = {
         "streaming": [
             "sensacine.com.ar", "justwatch.com", "filmaffinity.com",
@@ -408,7 +551,7 @@ async def research_category(state: ResearcherState) -> dict:
     }
     domains = _CATEGORY_DOMAINS.get(category)
 
-    # 1. Execute all Tavily searches for this category (run in executor to not block)
+    # 1. Execute all searches for this category
     all_results = []
     loop = asyncio.get_event_loop()
     for query in queries:
@@ -424,7 +567,7 @@ async def research_category(state: ResearcherState) -> dict:
             f"estrenos HBO Max {target_date} Argentina",
         ]
         for eq in _extra_streaming_queries:
-            if eq not in queries:  # avoid duplicates
+            if eq not in queries:
                 extra_results = await loop.run_in_executor(None, _tavily_search, eq, config, None)
                 all_results.extend(extra_results)
                 logger.info(f"🔍 [{category}] Extra query '{eq}': {len(extra_results)} results")
@@ -432,42 +575,51 @@ async def research_category(state: ResearcherState) -> dict:
     # 1c. For deportes, guarantee we fetch the day's agenda/fixture
     if category == "deportes":
         _extra_deportes_queries = [
-            f"agenda deportiva hoy {target_date} futbol argentino",
+            f"agenda deportiva {target_date} futbol argentino",
             f"fixture partidos primera division argentina {target_date}",
             f"programacion horarios futbol copa {target_date}",
+            f"site:promiedos.com.ar primera division {target_date}",
+            f"copa libertadores sudamericana equipos argentinos {target_date}",
+            f"seleccion argentina partido {target_date}",
+            f"site:tycsports.com agenda futbol {target_date}",
         ]
         for eq in _extra_deportes_queries:
             if eq not in queries:
-                # Intentionally passing None for domains so Tavily can hit any sports site
                 extra_results = await loop.run_in_executor(None, _tavily_search, eq, config, None)
                 all_results.extend(extra_results)
                 logger.info(f"🔍 [{category}] Extra query '{eq}': {len(extra_results)} results")
+
+    # 1d. Scrape Firecrawl targets for this category
+    firecrawl_results = await _scrape_firecrawl_targets(category)
+    if firecrawl_results:
+        all_results.extend(firecrawl_results)
+        logger.info(f"🔥 [{category}] Added {len(firecrawl_results)} Firecrawl target results")
 
     if not all_results:
         logger.info(f"⚠️  [{category}] No search results found")
         return {"raw_events": []}
 
-    # 2. Enrich SPA results with Playwright for accurate dates/providers
+    # 2. Enrich SPA results with Jina Reader/Firecrawl
     enriched_results = []
     for r in all_results:
         url = r.get("url", "")
-        is_spa = async_playwright and any(d in url.lower() for d in _EVENTOS_SPA_DOMAINS)
+        is_spa = any(d in url.lower() for d in SITES_DDG)
         if is_spa:
-            logger.info(f"🌐 [{category}] Playwright scraping: {url}")
+            logger.info(f"🌐 [{category}] SPA scraping (Jina/Firecrawl): {url}")
             scraped = await _scrape_spa_evento(url)
             if scraped:
-                r = {**r, "content": scraped}  # Replace static snippet with live content
+                r = {**r, "content": scraped}
         enriched_results.append(r)
 
-    # 3. Format search results for the LLM (crucial to truncate string length to save rate limits)
+    # 3. Format search results for the LLM
     search_context = "\n\n".join([
         f"**Fuente**: {r.get('url', 'N/A')}\n"
         f"**Título**: {r.get('title', 'N/A')}\n"
-        f"**Contenido**: {str(r.get('content', 'N/A'))[:450]}..."  # TRUNCATE to avoid 429 Token Rate Limit exhaustion
+        f"**Contenido**: {str(r.get('content', 'N/A'))[:450]}..."
         for r in enriched_results
     ])
 
-    # 3. Ask LLM to extract structured events
+    # 4. Ask LLM to extract structured events
     _arg_tz = timezone(timedelta(hours=-3))
     today_arg = datetime.now(_arg_tz).strftime("%Y-%m-%d")
     prompt = RESEARCHER_SYSTEM_PROMPT.format(category=category, target_date=target_date, today_date=today_arg)
@@ -480,12 +632,12 @@ async def research_category(state: ResearcherState) -> dict:
                 {"role": "system", "content": prompt},
                 {"role": "user", "content": f"Resultados de búsqueda:\n\n{search_context}"},
             ],
+            pydantic_schema=ResearchFindings,
         )
         events = [event.model_dump() for event in findings.events]
         logger.info(f"✅ [{category}] Extracted {len(events)} events")
         return {"raw_events": events}
     except Exception as e:
-        # Fallback: try to rescue data from Groq's failed_generation
         fallback = _parse_failed_generation(e, ResearchFindings)
         if fallback and fallback.events:
             events = [event.model_dump() for event in fallback.events]
@@ -505,7 +657,6 @@ def route_to_researchers(state: AgentState) -> list[Send]:
     if not plan:
         return []
 
-    # Group queries by category
     categories: dict[str, list[str]] = {}
     for sq in plan.queries:
         categories.setdefault(sq.category, []).append(sq.query)
@@ -537,7 +688,6 @@ def aggregate_results(state: AgentState) -> dict:
     raw = state.get("raw_events", [])
     logger.info(f"📦 Aggregating {len(raw)} raw events")
 
-    # Simple deduplication by event name (lowercase)
     seen = set()
     unique = []
     for event in raw:
@@ -554,7 +704,6 @@ def aggregate_results(state: AgentState) -> dict:
 # Node: Verify Dates via Scraping
 # ─────────────────────────────────────────────────────
 
-# Date patterns to search for in scraped pages (DD/MM/YYYY, DD de Mes de YYYY, YYYY-MM-DD, etc.)
 _MONTH_NAMES = {
     'enero': '01', 'febrero': '02', 'marzo': '03', 'abril': '04',
     'mayo': '05', 'junio': '06', 'julio': '07', 'agosto': '08',
@@ -566,41 +715,65 @@ _MONTH_NAMES = {
 
 
 def _extract_dates_from_text(text: str) -> list[str]:
-    """Extract all dates from text and return as YYYY-MM-DD strings."""
+    """Extract all dates from text using DATE_PATTERNS and return as YYYY-MM-DD strings."""
     dates_found = []
 
-    # Pattern 1: YYYY-MM-DD (ISO format)
-    for m in re.finditer(r'(\d{4})-(\d{2})-(\d{2})', text):
-        dates_found.append(f"{m.group(1)}-{m.group(2)}-{m.group(3)}")
-
-    # Pattern 2: DD/MM/YYYY or DD-MM-YYYY
-    for m in re.finditer(r'(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})', text):
-        day, month, year = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
-        if 1 <= int(month) <= 12 and 1 <= int(day) <= 31:
-            dates_found.append(f"{year}-{month}-{day}")
-
-    # Pattern 3: "14 de febrero de 2026" / "February 14, 2026"
-    text_lower = text.lower()
-    for month_name, month_num in _MONTH_NAMES.items():
-        # Spanish: "14 de febrero de 2026" or "14 de febrero, 2026"
-        for m in re.finditer(
-            rf'(\d{{1,2}})\s+de\s+{month_name}\s+(?:de\s+|,?\s*)(\d{{4}})',
-            text_lower
-        ):
-            day = m.group(1).zfill(2)
-            year = m.group(2)
-            dates_found.append(f"{year}-{month_num}-{day}")
-
-        # English: "February 14, 2026"
-        for m in re.finditer(
-            rf'{month_name}\s+(\d{{1,2}}),?\s+(\d{{4}})',
-            text_lower
-        ):
-            day = m.group(1).zfill(2)
-            year = m.group(2)
-            dates_found.append(f"{year}-{month_num}-{day}")
+    # Use global DATE_PATTERNS for matching
+    for pattern in DATE_PATTERNS:
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            raw = m.group(1)
+            parsed = _try_parse_date(raw)
+            if parsed:
+                dates_found.append(parsed)
 
     return list(set(dates_found))
+
+
+def _extract_times_from_text(text: str) -> list[str]:
+    """Extract all times from text using TIME_PATTERNS."""
+    times_found = []
+    for pattern in TIME_PATTERNS:
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            times_found.append(m.group(1).strip())
+    return list(set(times_found))
+
+
+def _try_parse_date(raw: str) -> str | None:
+    """Try to parse a raw date string into YYYY-MM-DD format."""
+    raw = raw.strip()
+
+    # YYYY-MM-DD or YYYY/MM/DD
+    m = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$', raw)
+    if m:
+        y, mo, d = m.group(1), m.group(2).zfill(2), m.group(3).zfill(2)
+        if 1 <= int(mo) <= 12 and 1 <= int(d) <= 31:
+            return f"{y}-{mo}-{d}"
+
+    # DD/MM/YYYY or DD-MM-YYYY
+    m = re.match(r'^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$', raw)
+    if m:
+        d, mo, y = m.group(1).zfill(2), m.group(2).zfill(2), m.group(3)
+        if 1 <= int(mo) <= 12 and 1 <= int(d) <= 31:
+            return f"{y}-{mo}-{d}"
+
+    # "15 de marzo de 2025" / "15 marzo 2025"
+    text_lower = raw.lower()
+    for month_name, month_num in _MONTH_NAMES.items():
+        m = re.match(
+            rf'(\d{{1,2}})\s+(?:de\s+)?{month_name}\s+(?:de\s+)?(\d{{4}})',
+            text_lower
+        )
+        if m:
+            d = m.group(1).zfill(2)
+            y = m.group(2)
+            return f"{y}-{month_num}-{d}"
+
+        # "marzo 2025" (day unknown → use 01)
+        m = re.match(rf'^{month_name}\s+(\d{{4}})$', text_lower)
+        if m:
+            return f"{m.group(1)}-{month_num}-01"
+
+    return None
 
 
 async def _scrape_url(url: str, timeout: float = 8.0) -> str:
@@ -614,10 +787,9 @@ async def _scrape_url(url: str, timeout: float = 8.0) -> str:
             resp = await client.get(url)
             resp.raise_for_status()
             soup = BeautifulSoup(resp.text, 'html.parser')
-            # Remove script and style elements
             for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
                 tag.decompose()
-            return soup.get_text(separator=' ', strip=True)[:2500]  # Cap at 2.5k chars to save tokens (was 5k)
+            return soup.get_text(separator=' ', strip=True)[:2500]
     except Exception as e:
         logger.debug(f"Could not scrape {url}: {e}")
         return ""
@@ -625,10 +797,9 @@ async def _scrape_url(url: str, timeout: float = 8.0) -> str:
 
 async def verify_dates(state: AgentState) -> dict:
     """Scrape source URLs to verify and correct event dates.
-    
-    The LLM sometimes assigns incorrect dates to events (e.g. Bridgerton on Feb 14
-    when the source says Feb 20). This node fetches the source pages and extracts
-    real dates to correct any mismatches.
+
+    For past target dates, all events are kept (source pages update quickly).
+    For future dates, events are discarded if target_date is not found on source.
     """
     raw = state.get("raw_events", [])
     target_date = state.get("target_date", "")
@@ -636,10 +807,16 @@ async def verify_dates(state: AgentState) -> dict:
     if not raw:
         return {"raw_events": {"type": "override", "value": []}}
 
+    # Determine if the target date is in the past
+    _arg_tz = timezone(timedelta(hours=-3))
+    today_str = datetime.now(_arg_tz).strftime("%Y-%m-%d")
+    is_past_date = bool(target_date and target_date < today_str)
+    if is_past_date:
+        logger.info(f"🔎 Target date {target_date} is in the past — events will be kept even if date not found on source")
+
     logger.info(f"🔎 Verifying dates for {len(raw)} events via scraping...")
 
     verified = []
-    # Scrape all URLs concurrently (with a limit)
     scrape_tasks = []
     async def _empty_scrape():
         return ""
@@ -651,7 +828,6 @@ async def verify_dates(state: AgentState) -> dict:
         else:
             scrape_tasks.append((event, _empty_scrape()))
 
-    # Gather all scraping results
     events_and_coros = [(ev, coro) for ev, coro in scrape_tasks]
     scraped_texts = await asyncio.gather(*[coro for _, coro in events_and_coros])
 
@@ -660,20 +836,15 @@ async def verify_dates(state: AgentState) -> dict:
         original_date = event.get("fecha", "")
 
         if not page_text:
-            # Couldn't scrape — keep original
             verified.append(event)
             continue
 
-        # Extract all dates from the scraped page
         page_dates = _extract_dates_from_text(page_text)
 
         if not page_dates:
-            # No dates found on page — keep original
             verified.append(event)
             continue
 
-        # If target_date is explicitly mentioned on the page, assume the LLM found it 
-        # but messed up the extraction date. We keep it and correct to target_date.
         if target_date in page_dates:
             if original_date != target_date:
                 logger.info(
@@ -684,13 +855,20 @@ async def verify_dates(state: AgentState) -> dict:
             verified.append(event)
             continue
 
-        # If we got here, the target_date is NOT anywhere on the page, but OTHER dates are.
-        # This usually means the LLM grabbed a monthly release list and pulled the wrong event.
+        # target_date NOT found on page
+        if is_past_date:
+            logger.info(
+                f"📅 [{event_name}] Kept (past date): source page likely updated, "
+                f"trusting LLM extraction. Page dates: {page_dates}"
+            )
+            verified.append(event)
+            continue
+
+        # Future date: discard
         logger.warning(
             f"🗑️ [{event_name}] Discarded: Target date {target_date} not found on source page. "
             f"Page dates found: {page_dates}"
         )
-        # Event is purposefully NOT appended to `verified` list
 
     logger.info(f"🔎 Date verification complete: kept {len(verified)} verified events out of {len(raw)}")
     return {"raw_events": {"type": "override", "value": verified}}
@@ -702,9 +880,9 @@ async def verify_dates(state: AgentState) -> dict:
 
 async def filter_argentina(state: AgentState) -> dict:
     """Use LLM to filter ONLY deportes/especiales events by Argentina relevance.
-    
+
     Streaming and gaming events are auto-passed since they were already
-    validated by the researcher node and the LLM consistently drops them incorrectly.
+    validated by the researcher node.
     """
     config = Configuration.from_env()
     raw = state.get("raw_events", [])
@@ -712,7 +890,6 @@ async def filter_argentina(state: AgentState) -> dict:
     if not raw:
         return {"filtered_events": []}
 
-    # Split events: auto-pass streaming/gaming, only filter deportes/especiales with LLM
     auto_pass = []
     needs_filtering = []
     for event in raw:
@@ -727,12 +904,10 @@ async def filter_argentina(state: AgentState) -> dict:
         f"{len(needs_filtering)} to filter (deportes/especiales)"
     )
 
-    # If nothing needs LLM filtering, just return all
     if not needs_filtering:
         logger.info(f"🇦🇷 All {len(auto_pass)} events auto-passed (no deportes/especiales to filter)")
         return {"filtered_events": auto_pass}
 
-    # Filter only deportes/especiales through the LLM
     llm = _get_llm(config.filter_model)
     structured_llm = llm.with_structured_output(FilteredReport)
 
@@ -752,11 +927,11 @@ async def filter_argentina(state: AgentState) -> dict:
                 {"role": "system", "content": filter_prompt},
                 {"role": "user", "content": f"Eventos a filtrar:\n\n{events_json}"},
             ],
+            pydantic_schema=FilteredReport,
         )
         llm_filtered = [e.model_dump() for e in report.events]
         logger.info(f"🇦🇷 LLM filtered deportes/especiales to {len(llm_filtered)} events")
     except Exception as e:
-        # Fallback: try to rescue data from Groq's failed_generation
         fallback = _parse_failed_generation(e, FilteredReport)
         if fallback and fallback.events:
             llm_filtered = [ev.model_dump() for ev in fallback.events]
@@ -765,7 +940,6 @@ async def filter_argentina(state: AgentState) -> dict:
             logger.warning(f"❌ Filter failed, passing deportes/especiales unfiltered: {e}")
             llm_filtered = needs_filtering
 
-    # Combine: auto-passed streaming/gaming + LLM-filtered deportes/especiales
     combined = auto_pass + llm_filtered
     logger.info(f"✅ Final filtered total: {len(combined)} events ({len(auto_pass)} auto + {len(llm_filtered)} filtered)")
     return {"filtered_events": combined}
@@ -798,7 +972,6 @@ async def generate_report(state: AgentState) -> dict:
 
     report_text = response.content.strip()
 
-    # Clean markdown fences if present
     if report_text.startswith("```"):
         lines = report_text.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
@@ -824,7 +997,7 @@ def build_graph():
     graph.add_node("filter_argentina", filter_argentina)
     graph.add_node("generate_report", generate_report)
 
-    # Add edges
+    # Add edges — simple linear pipeline, no clarify node
     graph.add_edge(START, "plan_research")
     graph.add_conditional_edges("plan_research", route_to_researchers, ["research_category"])
     graph.add_edge("research_category", "aggregate_results")

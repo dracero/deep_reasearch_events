@@ -31,7 +31,7 @@ class RoutingDecision(BaseModel):
 
 def build_router_model() -> GroqChatModel:
     return GroqChatModel(
-        model_id="llama-3.3-70b-versatile",  # Smart enough to understand nuanced intent
+        model_id="llama-3.3-70b-versatile",  # Reverting because llama-4 is not yet accessible
         api_key=os.getenv("GROQ_API_KEY"),
         temperature=0.0,
     )
@@ -57,10 +57,58 @@ Respondé SOLO con este JSON estricto (no uses markdown):
 }
 """
 
+# ─── Regex patterns for zero-cost pre-routing ────────────────────────────────
+import re
+
+# Pattern: "de [city] a [city]" or "desde [city] hasta [city]" combined with
+# a travel verb or noun anywhere in the message. This fires ONLY when an explicit
+# origin+destination pair is present alongside a travel-intent phrase.
+_TRAVEL_ORIGIN_DEST_RE = re.compile(
+    r"\b(de|desde)\b.{1,50}\b(a|hasta|hacia|para)\b.{1,50}",
+    re.IGNORECASE | re.DOTALL,
+)
+_TRAVEL_VERB_RE = re.compile(
+    r"\b(viaj|volar|vuelo|pasaje|boleto|ticket|ruta|cómo ir|como ir|llegar a|"
+    r"mejor opci[oó]n para ir|la forma más barata|quiero ir a|"
+    r"trasladarme|trasladar|combinaci[oó]n de vuelos|opciones para viajar)\b",
+    re.IGNORECASE,
+)
+
+
+def _quick_travel_detect(user_message: str) -> dict | None:
+    """Return a viajes routing decision immediately when the message contains
+    an explicit origin+destination pair AND a travel verb/noun.
+
+    This pre-filter runs BEFORE calling the LLM to save tokens and avoid
+    misclassification when the intent is unambiguous.
+    Returns None if the message doesn't match, meaning the LLM should decide.
+    """
+    lower = user_message.lower()
+    has_route = bool(_TRAVEL_ORIGIN_DEST_RE.search(lower))
+    has_travel_word = bool(_TRAVEL_VERB_RE.search(lower))
+
+    if has_route and has_travel_word:
+        return {
+            "intent": "viajes",
+            "origin": "",       # Orchestrator server will still parse these from LLM context
+            "destination": "",
+            "travel_dates": "",
+        }
+    return None
+
+
 async def determine_intent(user_message: str, history: list[dict] = None) -> dict:
+    # ── Zero-cost pre-filter: detect unambiguous travel requests ────────────
+    # Patterns like "viajar de X a Y" or "vuelo de X a Y" are always viajes.
+    # This avoids calling the LLM (and wasting tokens) on clear-cut cases.
+    quick_decision = _quick_travel_detect(user_message)
+    if quick_decision:
+        logger.info(f"[Router] Quick travel detection fired → {quick_decision}")
+        return quick_decision
+
     llm = build_router_model()
 
-    # Inyectamos la fecha/hora real para que el LLM resuelva "hoy", "mañana", etc.
+    # Inject real date so the LLM resolves "hoy", "mañana", etc.
     current_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     system_prompt = (
         ROUTER_PROMPT
@@ -71,10 +119,9 @@ async def determine_intent(user_message: str, history: list[dict] = None) -> dic
     )
 
     messages = [SystemMessage(system_prompt)]
-    
+
     if history:
-        # Añadir al prompt los mensajes pasados excepto el mensaje actual que ya vino en 'history' pero lo repetimos en user_message
-        for msg in history[:-1]:  
+        for msg in history[:-1]:
             if msg.get("role") == "user":
                 messages.append(UserMessage(msg.get("content", "")))
             elif msg.get("role") == "assistant":
@@ -117,13 +164,43 @@ async def determine_intent(user_message: str, history: list[dict] = None) -> dic
 
     except json.JSONDecodeError as e:
         logger.error(f"Routing JSON parse error: {e} — raw: {raw_text}", exc_info=True)
-        # Intentar inferir intent del texto crudo
-        lower = raw_text.lower() if raw_text else ""
-        if "evento" in lower:
-            return {"intent": "eventos", "target_date": datetime.now().strftime("%Y-%m-%d")}
-        return {"intent": "eventos", "target_date": datetime.now().strftime("%Y-%m-%d")}
+        # Try to infer intent from the raw text or the original user message
+        return _infer_intent_from_text(raw_text or user_message)
 
     except Exception as e:
         logger.error(f"Routing error: {e}", exc_info=True)
-        # Default fallback — eventos (no viajes) ya que es el caso más común
-        return {"intent": "eventos", "target_date": datetime.now().strftime("%Y-%m-%d")}
+        # Try to infer intent from the user message directly
+        return _infer_intent_from_text(user_message)
+
+
+def _infer_intent_from_text(text: str) -> dict:
+    """Fallback intent classifier using simple keyword matching.
+
+    Avoids the bug where any error would incorrectly default to 'eventos'.
+    """
+    lower = text.lower()
+
+    _VIAJES_KEYWORDS = (
+        "viaj", "vuelo", "pasaje", "boleto", "ticket", "bus", "avion", "avión",
+        "ruta", "trayecto", "ida", "llegada", "salida", "cómo ir", "como ir",
+        "cuánto cuesta ir", "precio de ir", "transporte", "aerolinea", "aerolínea",
+        "jetsmart", "flybondi", "latam", "aerolíneas", "aerolineas",
+    )
+    _EVENTOS_KEYWORDS = (
+        "evento", "partido", "recital", "mundial", "torneo", "concierto",
+        "estreno", "show", "competencia", "liga", "copa",
+    )
+
+    has_travel = any(kw in lower for kw in _VIAJES_KEYWORDS)
+    has_event = any(kw in lower for kw in _EVENTOS_KEYWORDS)
+
+    if has_travel and has_event:
+        # Both present → route to viajes since "events" is given as context for the trip
+        return {"intent": "viajes", "origin": "", "destination": "", "travel_dates": ""}
+    elif has_travel:
+        return {"intent": "viajes", "origin": "", "destination": "", "travel_dates": ""}
+    elif has_event:
+        return {"intent": "eventos", "target_date": ""}
+
+    # True default if no keywords match at all
+    return {"intent": "eventos", "target_date": ""}

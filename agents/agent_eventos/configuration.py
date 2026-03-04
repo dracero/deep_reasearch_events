@@ -32,12 +32,16 @@ class Configuration(BaseModel):
 
     # ── Search Config ───────────────────────────────────────
     tavily_max_results: int = Field(
-        default=5,
+        default=8,
         description="Max results per Tavily search query.",
     )
     tavily_search_depth: str = Field(
         default="advanced",
         description="Tavily search depth: 'basic' or 'advanced'.",
+    )
+    search_max_results: int = Field(
+        default=8,
+        description="Max results per DDG search query (alias for tavily_max_results).",
     )
 
     # ── Research Config ─────────────────────────────────────

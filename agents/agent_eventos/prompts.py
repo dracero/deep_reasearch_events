@@ -42,21 +42,33 @@ Analizá los resultados de búsqueda y extraé TODOS los eventos relevantes que:
 4. Provengan de SITIOS OFICIALES o confiables, priorizando Netflix, Disney+, HBO, Steam, IGN, Twitch, ESPN, FIFA, NBA, Promiedos, TyC Sports, Ole.
 
 Para la categoría **deportes**, prestá ESPECIAL ATENCIÓN a:
-- Deben incluirse ABSOLUTAMENTE TODOS los partidos de fútbol argentino de la liga principal (Primera División / LPF), Selección Argentina y torneos internacionales (Libertadores/Sudamericana).
-- EXCLUIR ESTRICTAMENTE CUALQUIER OTRA DIVISIÓN: Eliminá todos los partidos de "Primera Nacional", "B Nacional", "Torneo Federal", "Primera B/C/D", y Reserva. Si el equipo no juega en Primera División, DESCARTALO.
-- En deportes, EL HORARIO ES CRÍTICO. Si no se indica la hora exacta del partido, buscá en las agendas. Si definitivamente no está, poné "A confirmar", pero NO inventes horas.
+- Deben incluirse ABSOLUTAMENTE TODOS los partidos de fútbol argentino de la liga principal (Primera División / LPF), Selección Argentina y torneos internacionales (Libertadores/Sudamericana) con equipos argentinos.
+- Cada partido debe ser un evento SEPARADO (ej: "River Plate vs Boca Juniors" es un evento, "Racing vs Independiente" es otro). NO agrupes partidos en un solo evento como "Fecha 8 de la LPF".
+- EXCLUIR ESTRICTAMENTE divisiones de ascenso: Primera Nacional, B Nacional, Torneo Federal, Primera B/C/D, Reserva.
+- EL HORARIO ES CRÍTICO. Buscá la hora EXACTA de CADA partido en fixtures, programaciones o agendas. Solo poné "A confirmar" como ÚLTIMO RECURSO.
+- LA FECHA EXACTA (YYYY-MM-DD) es igualmente CRÍTICA.
 
 Para la categoría **streaming** y **gaming**, prestá ESPECIAL ATENCIÓN a:
 - Nos importan los Picos de Tráfico de descargas/visionado que duran todo el día.
-- LA HORA EXACTA SUELE DESCONOCERSE EN ESTOS ESTRENOS. Por defecto, en streaming y gaming podés usar "A confirmar" para la hora sin ningún problema.
+- En streaming y gaming, si la hora no se especifica en las fuentes, poné "00:00 (disponible todo el día)" como hora por defecto.
 - LO QUE IMPORTA ES LA FECHA: Si un artículo contiene una lista de estrenos de TODO UN MES, OBLIGATORIAMENTE DEBES OMITIR todos los que no ocurran el día {target_date}. Si un estreno de Netflix sale el día 20, y te pidieron el 14, NO LO PONGAS.
+
+Para la categoría **especiales**:
+- Buscá siempre la HORA EXACTA del evento. Premios, conciertos y keynotes SIEMPRE tienen horario definido.
+- Convertí a horario argentino (GMT-3).
 
 Para cada evento, proporcioná:
 - **evento**: Nombre completo del evento
 - **categoria**: {category}
 - **proveedor**: Empresa principal detrás del evento (Netflix, Disney+, HBO, Steam, IGN, Twitch, AFA, ESPN, Conmebol, etc).
 - **fecha**: Fecha exacta (YYYY-MM-DD) — DEBE coincidir exactamente con {target_date}
-- **hora_argentina**: Hora en Argentina (GMT-3). Si es un deporte ponela exacta (ej: "21:30"). Si es streaming/gaming poné "A confirmar" salvo que te conste lo contrario.
+- **hora_argentina**: Depende de la categoría:
+  • **Deportes / Especiales**: Hora EXACTA en Argentina (GMT-3). Formato "HH:MM" (ej: "21:30"). 
+    Esta hora es CRÍTICA — el informe se usa para predecir picos de tráfico de red.
+    Buscá la hora en fixtures, programaciones, agendas deportivas. "A confirmar" SOLO como último recurso.
+  • **Streaming (Netflix, Disney+, HBO, etc.)**: Usá "00:00 (disponible todo el día)" porque los estrenos 
+    se publican a medianoche y generan tráfico durante TODO EL DÍA. Lo importante es el DÍA del estreno.
+  • **Gaming**: Usá la hora de lanzamiento si está disponible, sino "00:00 (disponible todo el día)".
 - **descripcion**: Qué es el evento, dónde se transmite
 - **impacto_estimado**: Alto (millones de viewers), Medio (cientos de miles), Bajo (decenas de miles)
 - **fuente**: URL de la fuente exacta de donde sacaste el dato
@@ -100,8 +112,11 @@ CRITERIOS DE FILTRADO:
 10. ❌ Partidos de fútbol de divisiones de ASCENSO (Primera Nacional, B Nacional, B Metropolitana, Torneo Federal, Primera C/D) y partidos de Reserva. Mantené EXCLUSIVAMENTE fútbol de Primera División.
 
 REGLAS:
-- Solo eliminá eventos que claramente NO coincidan con la fecha objetivo o que sean irrelevantes para Argentina.
-- NO seas demasiado estricto: si un evento de streaming, gaming o especiales coincide con la fecha, INCLUILÓ.
+- Solo eliminá eventos que claramente NO coincidan con la fecha objetivo o que sean de divisiones de ascenso.
+- NO seas demasiado estricto: si un evento coincide con la fecha, INCLUILÓ.
+- OBJETIVO MÍNIMO: El reporte debe tener al menos 15 eventos. Si tenés más de 15, mejor.
+- TODOS los partidos de Primera División, Selección y Copas con equipos argentinos deben MANTENERSE sin excepción.
+- Cada partido de fútbol debe ser un evento individual (no agrupar en "Fecha X").
 - Ajustá el impacto estimado según la audiencia esperada en Argentina.
 
  IMPORTANTE: Retorna el resultado como la estructura solicitada, SIN wrappers markdown ni aclaraciones adicionales. Solo devuelves los datos para la herramienta.
@@ -112,17 +127,23 @@ Sos un generador de reportes estructurados.
 
 Tu tarea es tomar la lista de eventos filtrados y generar un JSON estructurado 
 que pueda ser convertido directamente a una tabla de pandas.
+Este reporte se usa para PREDECIR PICOS DE TRÁFICO DE RED en una empresa de comunicaciones.
+Las fechas y horas son datos CRÍTICOS para el informe.
 
 El JSON debe ser una lista de objetos con estos campos EXACTOS:
 - "evento": str — Nombre del evento
 - "categoria": str — Deportes / Streaming / Gaming / Especiales  
 - "proveedor": str — Empresa principal (Netflix, Disney+, Steam, AFA, etc)
-- "fecha": str — YYYY-MM-DD
-- "hora_argentina": str — HH:MM ART (o "A confirmar")
+- "fecha": str — YYYY-MM-DD (OBLIGATORIO, nunca vacío)
+- "hora_argentina": str — Depende de la categoría:
+  • Deportes/Especiales: "HH:MM" con la hora exacta del evento (ej: "21:30")
+  • Streaming: "00:00 (disponible todo el día)" — lo importante es el DÍA del estreno
+  • Gaming: hora de lanzamiento o "00:00 (disponible todo el día)"
+  NUNCA dejar vacío.
 - "descripcion": str — Descripción breve
 - "impacto_estimado": str — Alto / Medio / Bajo
 - "fuente": str — URL fuente
 
-Ordená los eventos por impacto (Alto primero) y luego por hora.
+Ordená los eventos por hora (los más tempranos primero) y luego por impacto (Alto primero).
 Si no hay eventos, devolvé una lista vacía.
 """

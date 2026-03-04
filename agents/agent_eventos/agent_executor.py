@@ -62,11 +62,17 @@ class EventosAgentExecutor(AgentExecutor):
                 end_idx = user_message.rfind("}") + 1
                 json_str = user_message[start_idx:end_idx]
                 params = json.loads(json_str)
-                target_date = params.get("target_date", "2026-06-11")
+                target_date = params.get("target_date", "")
             else:
-                target_date = "2026-06-11"
+                target_date = ""
         except Exception:
-            target_date = "2026-06-11"
+            target_date = ""
+
+        if not target_date:
+            logger.warning("No target_date provided, defaulting to today")
+            from datetime import datetime, timezone, timedelta
+            _arg_tz = timezone(timedelta(hours=-3))
+            target_date = datetime.now(_arg_tz).strftime("%Y-%m-%d")
 
         initial_state = {
             "target_date": target_date,
@@ -80,7 +86,7 @@ class EventosAgentExecutor(AgentExecutor):
             # Execute LangGraph and stream intermediate steps as Artifacts
             async for event in graph.astream(initial_state, stream_mode="updates"):
                 # --- filter_argentina Node ---
-                if "filter_argentina" in event:
+                if "filter_argentina" in event and event["filter_argentina"] is not None:
                     filtered = event["filter_argentina"].get("filtered_events", [])
                     await event_queue.enqueue_event(
                         TaskArtifactUpdateEvent(

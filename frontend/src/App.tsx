@@ -109,9 +109,9 @@ function App() {
               if (event.component === 'AgentQuestion') {
                 setActiveAgent('viajes'); // Only the travel agent asks questions currently
               }
-              // When travel routes render, capture the origin+destination for context
-              if (event.component === 'TravelRoutes' && event.props?.context) {
-                setTravelContext(event.props.context);
+              // Accumulate travel context from orchestrator ContextUpdate events
+              if (event.component === 'ContextUpdate' && event.props?.context) {
+                setTravelContext(prev => ({ ...prev, ...event.props.context }));
               }
               // When results arrive, the conversation is complete — clear active agent
               if (event.component === 'TravelRoutes' || event.component === 'EventTable') {

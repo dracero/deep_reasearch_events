@@ -134,12 +134,25 @@ async def unified_chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]
     # from being misclassified as a new unrelated intent.
     if active_agent == "viajes":
         intent = "viajes"
+        # Accumulate params: keep what we already know, fill in the missing field
+        prev_origin = travel_context.get("origin", "")
+        prev_destination = travel_context.get("destination", "")
+        prev_dates = travel_context.get("travel_dates", "")
+
         decision = {
             "intent": "viajes",
-            "origin": travel_context.get("origin", "Buenos Aires"),
-            "destination": travel_context.get("destination", "USA"),
-            "travel_dates": message,   # The follow-up answer IS the new date info
+            "origin": prev_origin,
+            "destination": prev_destination,
+            "travel_dates": prev_dates,
         }
+        # The user's reply fills whichever critical field is still empty
+        if not decision["destination"]:
+            decision["destination"] = message
+        elif not decision["travel_dates"]:
+            decision["travel_dates"] = message
+        else:
+            # Both present — treat the reply as raw text for the agent to interpret
+            decision["travel_dates"] = message
         logger.info(f"[⚡️ Bypass] Active agent is '{active_agent}' — skipping LLM router.")
     elif active_agent == "eventos":
         intent = "eventos"
@@ -159,20 +172,27 @@ async def unified_chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]
         return
 
     if intent in ["eventos", "ambos"]:
-        # Params para el Agente Eventos
-        params = {"target_date": decision.get("target_date", "2026-06-11")}
+        # Params para el Agente Eventos — sin defaults duros para que Clarify funcione
+        params = {
+            "target_date": decision.get("target_date", ""),
+            "user_message_raw": message,
+        }
         async for sse in stream_a2a_agent("Agent Eventos", AGENT_URLS["eventos"], params):
             yield sse
 
     if intent in ["viajes", "ambos"]:
-        # Params para Agente Viajes
+        # Params para Agente Viajes sin defaults duros para permitir que Clarify funcione
         params = {
-            "origin": decision.get("origin", "Buenos Aires"),
-            "destination": decision.get("destination", "USA"),
-            "travel_dates": decision.get("travel_dates", "2026-06-11"),
+            "origin": decision.get("origin", ""),
+            "destination": decision.get("destination", ""),
+            "travel_dates": decision.get("travel_dates", ""),
+            "user_message_raw": message, # Necesario para que el nodo Clarify sepa qué dijo el usuario
         }
         async for sse in stream_a2a_agent("Agent Viajes", AGENT_URLS["viajes"], params):
             yield sse
+        # Emit accumulated context so the frontend can carry it to the next turn
+        ctx = {"origin": params["origin"], "destination": params["destination"], "travel_dates": params["travel_dates"]}
+        yield f"data: {json.dumps({'type': 'ui', 'component': 'ContextUpdate', 'props': {'context': ctx}})}\n\n"
 
 
 @app.post("/api/chat")

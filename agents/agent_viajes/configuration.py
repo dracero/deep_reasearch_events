@@ -36,13 +36,9 @@ class Configuration(BaseModel):
     )
 
     # ── Search Config ───────────────────────────────────────
-    tavily_max_results: int = Field(
+    search_max_results: int = Field(
         default=3,                            # Reduced from 5 to cut latency per segment
-        description="Max results per Tavily search query.",
-    )
-    tavily_search_depth: str = Field(
-        default="basic",                      # basic is faster and sufficient for price estimation
-        description="Tavily search depth: 'basic' or 'advanced'.",
+        description="Max results per DuckDuckGo search query.",
     )
 
     # ── Research Config ─────────────────────────────────────
