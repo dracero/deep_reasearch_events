@@ -55,7 +55,9 @@ class EventosAgentExecutor(AgentExecutor):
             )
         )
 
-        # Parse target_date from the incoming message (may be plain text or JSON)
+        # Parse target_date and new params from the incoming message (may be plain text or JSON)
+        categoria_evento = None
+        proveedor_esperado = None
         try:
             if "{" in user_message and "}" in user_message:
                 start_idx = user_message.find("{")
@@ -63,19 +65,22 @@ class EventosAgentExecutor(AgentExecutor):
                 json_str = user_message[start_idx:end_idx]
                 params = json.loads(json_str)
                 target_date = params.get("target_date", "")
+                categoria_evento = params.get("categoria_evento", "") or None
+                proveedor_esperado = params.get("proveedor_esperado", "") or None
             else:
                 target_date = ""
         except Exception:
             target_date = ""
 
         if not target_date:
-            logger.warning("No target_date provided, defaulting to today")
-            from datetime import datetime, timezone, timedelta
-            _arg_tz = timezone(timedelta(hours=-3))
-            target_date = datetime.now(_arg_tz).strftime("%Y-%m-%d")
+            logger.info("No target_date provided, clarify node will handle it")
 
         initial_state = {
             "target_date": target_date,
+            "user_category": categoria_evento,
+            "user_provider": proveedor_esperado,
+            "user_message_raw": user_message,   # For the clarify node
+            "clarify_question": "",             # Empty = clarify node will generate one
             "search_plan": None,
             "raw_events": [],
             "filtered_events": None,
@@ -85,6 +90,38 @@ class EventosAgentExecutor(AgentExecutor):
         try:
             # Execute LangGraph and stream intermediate steps as Artifacts
             async for event in graph.astream(initial_state, stream_mode="updates"):
+                # --- clarify Node: stream question to the user as a chat message ---
+                if "clarify" in event and event["clarify"] is not None:
+                    question = event["clarify"].get("clarify_question", "")
+                    if question:
+                        # Stream the question to the user as a UI component
+                        await event_queue.enqueue_event(
+                            TaskArtifactUpdateEvent(
+                                task_id=task_id,
+                                context_id=context_id,
+                                artifact=Artifact(
+                                    artifact_id=str(uuid.uuid4()),
+                                    parts=[
+                                        Part(root=TextPart(text=json.dumps({
+                                            "type": "ui",
+                                            "component": "AgentQuestion",
+                                            "props": {"question": question},
+                                        })))
+                                    ],
+                                ),
+                            )
+                        )
+                        # Signal input_required so the frontend knows to wait for user answer
+                        await event_queue.enqueue_event(
+                            TaskStatusUpdateEvent(
+                                task_id=task_id,
+                                context_id=context_id,
+                                status=TaskStatus(state=TaskState.input_required),
+                                final=True,
+                            )
+                        )
+                        return  # Stop execution until the user responds
+
                 # --- filter_argentina Node ---
                 if "filter_argentina" in event and event["filter_argentina"] is not None:
                     filtered = event["filter_argentina"].get("filtered_events", [])

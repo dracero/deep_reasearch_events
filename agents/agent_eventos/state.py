@@ -27,6 +27,16 @@ class SearchPlan(BaseModel):
     )
 
 
+class ClarifyDecision(BaseModel):
+    """The clarify node output."""
+    need_clarification: bool = Field(description="MUST BE TRUE si target_date está vacío, O si tanto category como provider están vacíos en el mensaje del usuario.")
+    missing_fields: List[str] = Field(description="Lista de los campos que faltan (ej: 'target_date', 'category').")
+    question: str = Field(description="Si need_clarification es true, redactá una pregunta breve y directa para el usuario preguntando lo que falta.")
+    extracted_target_date: str = Field(default="", description="Fecha extraída del mensaje (YYYY-MM-DD), o string vacío si no se mencionó.")
+    extracted_category: str = Field(default="", description="Categoría explícitamente mencionada (ej: deportes, streaming, especiales, gaming), 'todas' si quiere todas, o vacío si no menciona ninguna.")
+    extracted_provider: str = Field(default="", description="Proveedor explícitamente mencionado (ej: Netflix, Disney, Promiedos, etc), o string vacío si no se mencionó.")
+
+
 class EventInfo(BaseModel):
     """Structured info about a single event."""
     evento: str = Field(description="Nombre del evento")
@@ -63,7 +73,11 @@ def _list_reducer(current: list, new: list | dict) -> list:
 
 class AgentState(TypedDict):
     """Main graph state."""
+    user_message_raw: Optional[str]                          # el mensaje literal de la última vuelta
+    clarify_question: Optional[str]                          # si seteamos esto, se corta el graph y se devuelve la pregu al user
     target_date: str                                         # fecha objetivo (YYYY-MM-DD)
+    user_category: Optional[str]                             # categoría requerida por el usuario (ej deportes)
+    user_provider: Optional[str]                             # proveedor único requerido por el usuario (ej Netflix)
     search_plan: Optional[SearchPlan]                        # plan de búsqueda generado
     raw_events: Annotated[List[dict], _list_reducer]         # eventos crudos de los researchers
     filtered_events: Optional[List[dict]]                    # eventos filtrados por relevancia
@@ -75,4 +89,5 @@ class ResearcherState(TypedDict):
     target_date: str
     category: str
     queries: List[str]
+    user_provider: Optional[str]
     raw_events: Annotated[List[dict], _list_reducer]

@@ -29,7 +29,7 @@ import logging
 import asyncio
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import os
 import re
@@ -61,13 +61,17 @@ from state import (
     ResearchFindings,
     FilteredReport,
     EventInfo,
+    ClarifyDecision,
 )
+from context_manager import SQLiteContextManager
 from configuration import Configuration
 from prompts import (
     PLANNER_SYSTEM_PROMPT,
     RESEARCHER_SYSTEM_PROMPT,
     FILTER_SYSTEM_PROMPT,
     REPORT_SYSTEM_PROMPT,
+    CLARIFY_DECISION_PROMPT,
+    SYNTHESIS_SYSTEM_PROMPT,
 )
 
 logger = logging.getLogger(__name__)
@@ -245,12 +249,52 @@ def _parse_failed_generation(error, pydantic_model):
 
 
 # ─────────────────────────────────────────────────────
-# Search: Tavily (primary) + DuckDuckGo (fallback)
+# Search: Serper (primary) + Tavily + DuckDuckGo (fallback)
 # ─────────────────────────────────────────────────────
 
-@traceable(name="tavily_search", run_type="tool")
-def _tavily_search(query: str, config: Configuration, include_domains: list[str] | None = None) -> List[dict]:
-    """Execute a single Tavily search. Falls back to DuckDuckGo on error."""
+@traceable(name="perform_search", run_type="tool")
+def _perform_search(query: str, config: Configuration, include_domains: list[str] | None = None) -> List[dict]:
+    """Execute search trying: 1) Serper, 2) Tavily, 3) DuckDuckGo fallback."""
+    # 1. SERPER FALLBACK (Google Search)
+    serper_key = os.environ.get("SERPER_API_KEY")
+    if serper_key:
+        try:
+            import requests
+
+            serper_query = query
+            if include_domains:
+                site_query = " OR ".join([f"site:{d}" for d in include_domains])
+                serper_query = f"{query} ({site_query})"
+
+            payload = json.dumps({
+                "q": serper_query,
+                "gl": "ar",  # Country code for Argentina
+                "hl": "es",  # Language
+                "num": config.search_max_results
+            })
+            headers = {
+                'X-API-KEY': serper_key,
+                'Content-Type': 'application/json'
+            }
+
+            response = requests.request("POST", "https://google.serper.dev/search", headers=headers, data=payload, timeout=15)
+            response.raise_for_status()
+            res = response.json()
+
+            formatted_results = []
+            if "organic" in res:
+                for r in res["organic"]:
+                    formatted_results.append({
+                        "title": r.get("title", ""),
+                        "url": r.get("link", ""),
+                        "content": r.get("snippet", "")
+                    })
+            if formatted_results:
+                return formatted_results
+        except Exception as e:
+            logger.warning(f"Serper search failed for '{query}': {e}. Falling back to Tavily.")
+
+    # 2. TAVILY
     if _HAS_TAVILY:
         try:
             client = TavilyClient()
@@ -263,11 +307,13 @@ def _tavily_search(query: str, config: Configuration, include_domains: list[str]
             if include_domains:
                 kwargs["include_domains"] = include_domains
             response = client.search(**kwargs)
-            return response.get("results", [])
+            results = response.get("results", [])
+            if results:
+                return results
         except Exception as e:
             logger.warning(f"Tavily search failed for '{query}': {e}. Falling back to DuckDuckGo.")
 
-    # DuckDuckGo fallback (or primary if no Tavily key)
+    # 3. DUCK DUCK GO FALLBACK
     return _ddg_search(query, config, include_domains)
 
 
@@ -346,9 +392,24 @@ FIRECRAWL_TARGETS = [
         "categoria": "deportes",
     },
     {
-        "nombre":    "Promiedos Primera División",
-        "url":       "https://www.promiedos.com.ar/primera",
+        "nombre":    "Promiedos Home",
+        "url":       "https://www.promiedos.com.ar/",
         "categoria": "deportes",
+    },
+    {
+        "nombre":    "Netflix Top 10 Argentina (Tudum)",
+        "url":       "https://www.netflix.com/tudum/top10/argentina",
+        "categoria": "streaming",
+    },
+    {
+        "nombre":    "Disney+ Top 10 Argentina (FlixPatrol)",
+        "url":       "https://flixpatrol.com/top10/disney/argentina/",
+        "categoria": "streaming",
+    },
+    {
+        "nombre":    "Prime Video Top 10 Argentina (FlixPatrol)",
+        "url":       "https://flixpatrol.com/top10/amazon-prime/argentina/",
+        "categoria": "streaming",
     },
 ]
 
@@ -364,8 +425,11 @@ MAX_RESULTS_PER_QUERY = 5
 DATE_PATTERNS = [
     r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b",
     r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b",
+    r"\b(\d{1,2}[/-]\d{1,2})\b", # DD/MM
     r"\b(\d{1,2}\s+de\s+\w+\s+(?:de\s+)?\d{4})\b",
+    r"\b(\d{1,2}\s+de\s+\w+)\b", # DD de mes
     r"\b(\d{1,2}\s+\w+\s+\d{4})\b",
+    r"\b(\d{1,2}\s+\w+)\b", # DD mes
     r"\b((?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre"
     r"|january|february|march|april|may|june|july|august|september|october|november|december)"
     r"\s+\d{4})\b",
@@ -434,9 +498,12 @@ async def _scrape_with_firecrawl(url: str) -> str:
 async def _scrape_spa_evento(url: str) -> str:
     """Scrape an SPA page using Jina Reader (primary) + Firecrawl (fallback)."""
     text = await _scrape_with_jina(url)
-    if text:
+    if text and len(text) > 800:
         logger.info(f"✅ Jina Reader scraped {url} ({len(text)} chars)")
         return text
+    
+    if text:
+        logger.warning(f"⚠️ Jina Reader returned too little content ({len(text)} chars) for {url}. Falling back to Firecrawl.")
 
     text = await _scrape_with_firecrawl(url)
     if text:
@@ -451,11 +518,17 @@ async def _scrape_spa_evento(url: str) -> str:
 # Firecrawl Target Scraping
 # ─────────────────────────────────────────────────────
 
-async def _scrape_firecrawl_targets(category: str) -> List[dict]:
+async def _scrape_firecrawl_targets(category: str, user_provider: Optional[str] = None) -> List[dict]:
     """Scrape all FIRECRAWL_TARGETS matching the given category.
     Uses Jina Reader (primary) + Firecrawl (fallback) and returns
-    results formatted like search results for the LLM."""
+    results formatted like search results for the LLM.
+    If user_provider is specified, only targets whose name
+    contains the provider will be scraped."""
     targets = [t for t in FIRECRAWL_TARGETS if t["categoria"] == category]
+    if user_provider:
+        prov_lower = user_provider.lower()
+        targets = [t for t in targets if prov_lower in t["nombre"].lower()]
+
     if not targets:
         return []
 
@@ -479,6 +552,83 @@ async def _scrape_firecrawl_targets(category: str) -> List[dict]:
 
 
 # ─────────────────────────────────────────────────────
+# Node: Clarify (conversational pre-search)
+# ─────────────────────────────────────────────────────
+
+async def clarify(state: AgentState) -> dict:
+    """
+    Use structured output to decide if we need to ask the user for missing info.
+    """
+    config = Configuration.from_env()
+
+    if state.get("clarify_question"):
+        logger.info("💬 Clarification already done, skipping.")
+        return {}
+
+    _arg_tz = timezone(timedelta(hours=-3))
+    today_arg = datetime.now(_arg_tz).strftime("%Y-%m-%d")
+
+    prompt = CLARIFY_DECISION_PROMPT.format(
+        target_date=state.get("target_date", ""),
+        user_category=state.get("user_category", ""),
+        user_provider=state.get("user_provider", ""),
+        user_message=state.get("user_message_raw", ""),
+        today_date=today_arg,
+    )
+
+    try:
+        llm = _get_llm(config.clarify_model, temperature=0.0)
+        structured_llm = llm.with_structured_output(ClarifyDecision)
+        decision: ClarifyDecision = await _invoke_with_backoff(
+            structured_llm,
+            [
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": "Extraé la información del mensaje y decidí si necesito pedir algo más."},
+            ],
+            pydantic_schema=ClarifyDecision,
+        )
+
+        updates = {}
+        if decision.extracted_target_date and not state.get("target_date"):
+            updates["target_date"] = decision.extracted_target_date
+        if decision.extracted_category and not state.get("user_category"):
+            updates["user_category"] = decision.extracted_category
+        if decision.extracted_provider and not state.get("user_provider"):
+            updates["user_provider"] = decision.extracted_provider
+
+        if decision.need_clarification:
+            logger.info(f"💬 Clarification needed (missing: {decision.missing_fields}): {decision.question}")
+            updates["clarify_question"] = decision.question
+            return updates
+
+        # ── Safety net: force clarification if category+provider are still empty ──
+        effective_category = updates.get("user_category") or state.get("user_category") or ""
+        effective_provider = updates.get("user_provider") or state.get("user_provider") or ""
+        effective_date = updates.get("target_date") or state.get("target_date") or ""
+
+        if not effective_category and not effective_provider:
+            q = "¿Qué tipo de eventos te interesa? Podés elegir entre: deportes, streaming, gaming, especiales, o decirme 'todos'."
+            if not effective_date:
+                q = "¿Para qué fecha necesitás la información y qué tipo de eventos te interesa? (deportes, streaming, gaming, especiales, o 'todos')"
+            logger.info(f"💬 Safety net: category+provider empty, forcing clarification: {q}")
+            updates["clarify_question"] = q
+            return updates
+
+        if not effective_date:
+            q = "¿Para qué fecha necesitás la información de eventos?"
+            logger.info(f"💬 Safety net: date empty, forcing clarification: {q}")
+            updates["clarify_question"] = q
+            return updates
+
+        logger.info(f"✅ All critical info present (extracted: date={decision.extracted_target_date}, category={decision.extracted_category}, provider={decision.extracted_provider})")
+        return updates
+
+    except Exception as e:
+        logger.warning(f"Clarify decision failed: {e}. Proceeding without clarification.")
+        return {}
+
+
+# ─────────────────────────────────────────────────────
 # Node: Plan Research
 # ─────────────────────────────────────────────────────
 
@@ -491,8 +641,14 @@ async def plan_research(state: AgentState) -> dict:
     _arg_tz = timezone(timedelta(hours=-3))
     today_arg = datetime.now(_arg_tz).strftime("%Y-%m-%d")
     target = state['target_date']
+    user_cat = state.get('user_category') or ""
+    user_prov = state.get('user_provider') or ""
 
-    prompt = PLANNER_SYSTEM_PROMPT.format(max_queries=config.max_queries_per_category)
+    prompt = PLANNER_SYSTEM_PROMPT.format(
+        max_queries=config.max_queries_per_category,
+        user_category=user_cat,
+        user_provider=user_prov,
+    )
     user_msg = (
         f"La fecha de HOY (real, actual) es: {today_arg}.\n"
         f"El usuario quiere encontrar eventos para la FECHA OBJETIVO: {target}.\n\n"
@@ -500,11 +656,19 @@ async def plan_research(state: AgentState) -> dict:
         f"en Argentina para la fecha objetivo {target}.\n\n"
         f"IMPORTANTE: Solo buscá eventos que realmente ocurran en la fecha {target}. "
         f"NO confundas la fecha de hoy ({today_arg}) con la fecha objetivo ({target}).\n"
-        f"Para streaming, generá queries como: 'estrenos Netflix {target}', "
-        f"'nuevos en Disney+ {target}', 'nuevas series HBO {target}'.\n"
-        f"Para deportes, generá queries como: 'partidos fútbol argentino {target}', "
-        f"'fixture Liga Profesional {target}'."
     )
+
+    cat_check = user_cat.lower()
+    if not cat_check or "todas" in cat_check or "streaming" in cat_check:
+        user_msg += (
+            f"Para streaming, generá queries como: 'estrenos Netflix {target}', "
+            f"'nuevos en Disney+ {target}', 'nuevas series HBO {target}'.\n"
+        )
+    if not cat_check or "todas" in cat_check or "deport" in cat_check:
+        user_msg += (
+            f"Para deportes, generá queries como: 'partidos fútbol argentino {target}', "
+            f"'fixture Liga Profesional {target}'.\n"
+        )
 
     structured_llm = llm.with_structured_output(SearchPlan)
     plan: SearchPlan = await _invoke_with_backoff(
@@ -531,18 +695,18 @@ async def research_category(state: ResearcherState) -> dict:
     category = state["category"]
     target_date = state["target_date"]
     queries = state["queries"]
+    user_prov = state.get("user_provider")
 
     _CATEGORY_DOMAINS = {
         "streaming": [
-            "sensacine.com.ar", "justwatch.com", "filmaffinity.com",
-            "espinof.com", "infobae.com", "lanacion.com.ar",
+            "sensacine.com.ar", "justwatch.com/ar", "filmaffinity.com",
+            "espinof.com", "infobae.com", "lanacion.com.ar", "clarin.com",
+            "mendozapost.com", "losandes.com.ar", "perfil.com",
             "todomovieseries.com", "cinepremiere.com.mx",
             "screenrant.com", "whats-on-netflix.com",
         ],
         "deportes": [
-            "espn.com.ar", "tycsports.com", "ole.com.ar",
-            "fifa.com", "nba.com", "afa.com.ar", "conmebol.com",
-            "promiedos.com.ar", "infobae.com", "clarin.com",
+            "promiedos.com.ar", "ole.com.ar", "tycsports.com", "espn.com.ar"
         ],
         "gaming": [
             "store.steampowered.com", "ign.com", "twitch.tv",
@@ -550,17 +714,29 @@ async def research_category(state: ResearcherState) -> dict:
         ],
     }
     domains = _CATEGORY_DOMAINS.get(category)
+    
+    # Restrict domains explicitly if user_provider is given
+    # (assuming user_provider is a known domain or brand name like 'promiedos')
+    if user_prov:
+        prov_lower = user_prov.lower()
+        if domains:
+            filtered_domains = [d for d in domains if prov_lower in d]
+            if filtered_domains:
+                domains = filtered_domains
+            else:
+                # Si el proveedor no está en la lista estándar, asumismos que .com o .com.ar sirve
+                domains = [f"{prov_lower}.com.ar", f"{prov_lower}.com"]
 
     # 1. Execute all searches for this category
     all_results = []
     loop = asyncio.get_event_loop()
     for query in queries:
-        results = await loop.run_in_executor(None, _tavily_search, query, config, domains)
+        results = await loop.run_in_executor(None, _perform_search, query, config, domains)
         all_results.extend(results)
         logger.info(f"🔍 [{category}] Query '{query}': {len(results)} results")
 
     # 1b. For streaming, always add hardcoded queries to ensure Netflix/Disney+/HBO coverage
-    if category == "streaming":
+    if category == "streaming" and not user_prov:
         _extra_streaming_queries = [
             f"estrenos Netflix {target_date} Argentina",
             f"nuevas series películas Disney+ {target_date}",
@@ -568,29 +744,26 @@ async def research_category(state: ResearcherState) -> dict:
         ]
         for eq in _extra_streaming_queries:
             if eq not in queries:
-                extra_results = await loop.run_in_executor(None, _tavily_search, eq, config, None)
+                extra_results = await loop.run_in_executor(None, _perform_search, eq, config, None)
                 all_results.extend(extra_results)
                 logger.info(f"🔍 [{category}] Extra query '{eq}': {len(extra_results)} results")
 
     # 1c. For deportes, guarantee we fetch the day's agenda/fixture
-    if category == "deportes":
+    if category == "deportes" and not user_prov:
         _extra_deportes_queries = [
-            f"agenda deportiva {target_date} futbol argentino",
-            f"fixture partidos primera division argentina {target_date}",
-            f"programacion horarios futbol copa {target_date}",
             f"site:promiedos.com.ar primera division {target_date}",
-            f"copa libertadores sudamericana equipos argentinos {target_date}",
-            f"seleccion argentina partido {target_date}",
-            f"site:tycsports.com agenda futbol {target_date}",
+            f"site:promiedos.com.ar seleccion argentina {target_date}",
+            f"site:promiedos.com.ar libertadores sudamericana {target_date}",
+            f"site:promiedos.com.ar fixture futbol {target_date}",
         ]
         for eq in _extra_deportes_queries:
             if eq not in queries:
-                extra_results = await loop.run_in_executor(None, _tavily_search, eq, config, None)
+                extra_results = await loop.run_in_executor(None, _perform_search, eq, config, None)
                 all_results.extend(extra_results)
                 logger.info(f"🔍 [{category}] Extra query '{eq}': {len(extra_results)} results")
 
     # 1d. Scrape Firecrawl targets for this category
-    firecrawl_results = await _scrape_firecrawl_targets(category)
+    firecrawl_results = await _scrape_firecrawl_targets(category, user_provider=user_prov)
     if firecrawl_results:
         all_results.extend(firecrawl_results)
         logger.info(f"🔥 [{category}] Added {len(firecrawl_results)} Firecrawl target results")
@@ -611,13 +784,40 @@ async def research_category(state: ResearcherState) -> dict:
                 r = {**r, "content": scraped}
         enriched_results.append(r)
 
-    # 3. Format search results for the LLM
     search_context = "\n\n".join([
         f"**Fuente**: {r.get('url', 'N/A')}\n"
         f"**Título**: {r.get('title', 'N/A')}\n"
-        f"**Contenido**: {str(r.get('content', 'N/A'))[:450]}..."
+        f"**Contenido**: {str(r.get('content', r.get('snippet', 'N/A')))[:4000]}..."
         for r in enriched_results
     ])
+
+    if not search_context.strip():
+        logger.warning(f"⚠️ [{category}] Search context is EMPTY after enrichment")
+        return {"raw_events": []}
+
+    # 3. Context Synthesis if it's too large
+    context_manager = SQLiteContextManager()
+    if len(search_context) > config.context_synthesis_threshold:
+        logger.info(f"💾 [{category}] Context size ({len(search_context)} chars) exceeds threshold ({config.context_synthesis_threshold}). Checking SQLite cache...")
+        
+        cached_context = context_manager.get_synthesized_context(category, target_date)
+        if cached_context:
+            search_context = cached_context
+            logger.info(f"✅ [{category}] Using synthesized context from SQLite cache.")
+        else:
+            logger.info(f"🧠 [{category}] Synthesizing large context with LLM ({config.synthesis_model})...")
+            synthesis_llm = _get_llm(config.synthesis_model, temperature=0.0)
+            
+            synthesis_result = await _invoke_with_backoff(
+                synthesis_llm,
+                [
+                    {"role": "system", "content": SYNTHESIS_SYSTEM_PROMPT},
+                    {"role": "user", "content": f"Sintetizá los siguientes resultados para la categoría {category} y fecha {target_date}:\n\n{search_context}"},
+                ]
+            )
+            search_context = synthesis_result.content
+            context_manager.save_synthesized_context(category, target_date, search_context)
+            logger.info(f"✅ [{category}] Context synthesized and saved. New size: {len(search_context)} chars.")
 
     # 4. Ask LLM to extract structured events
     _arg_tz = timezone(timedelta(hours=-3))
@@ -651,30 +851,59 @@ async def research_category(state: ResearcherState) -> dict:
 # Edge: Fan-out to parallel researchers
 # ─────────────────────────────────────────────────────
 
-def route_to_researchers(state: AgentState) -> list[Send]:
-    """Create a Send for each category to run researchers in parallel."""
+def send_research_tasks(state: AgentState):
+    """Routing function: scatter to parallel researchers, but only for the requested category if one exists."""
     plan = state["search_plan"]
     if not plan:
         return []
 
-    categories: dict[str, list[str]] = {}
-    for sq in plan.queries:
-        categories.setdefault(sq.category, []).append(sq.query)
+    # Se agrupan las queries por categoría
+    from collections import defaultdict
+    category_queries = defaultdict(list)
+    for q in plan.queries:
+        category_queries[q.category].append(q.query)
 
+    # Si el usuario pidió una categoría específica (ej: "deportes"),
+    # ignoramos las queries de las otras categorías para ahorrar tiempo y tokens.
+    user_cat = state.get("user_category") or ""
+    cat_lower = user_cat.lower()
+    
+    if cat_lower and "todas" not in cat_lower:
+        requested = None
+        if "deport" in cat_lower:
+            requested = "deportes"
+        elif "stream" in cat_lower:
+            requested = "streaming"
+        elif "gam" in cat_lower or "juego" in cat_lower:
+            requested = "gaming"
+        elif "especial" in cat_lower:
+            requested = "especiales"
+        
+        if requested:
+            if requested in category_queries:
+                # Mandamos a investigar solo la que pidió
+                return [
+                    Send("research_category", {
+                        "category": requested,
+                        "queries": category_queries[requested],
+                        "target_date": state["target_date"],
+                        "user_provider": state.get("user_provider"),
+                        "raw_events": [],
+                    })
+                ]
+            else:
+                return []
     sends = []
-    for category, queries in categories.items():
+    for category, queries_list in category_queries.items():
         sends.append(
-            Send(
-                "research_category",
-                {
-                    "target_date": state["target_date"],
-                    "category": category,
-                    "queries": queries,
-                    "raw_events": [],
-                },
-            )
+            Send("research_category", {
+                "category": category,
+                "queries": queries_list,
+                "target_date": state["target_date"],
+                "user_provider": state.get("user_provider"),
+                "raw_events": [],
+            })
         )
-
     logger.info(f"🚀 Dispatching {len(sends)} parallel researchers")
     return sends
 
@@ -741,6 +970,9 @@ def _extract_times_from_text(text: str) -> list[str]:
 def _try_parse_date(raw: str) -> str | None:
     """Try to parse a raw date string into YYYY-MM-DD format."""
     raw = raw.strip()
+    _arg_tz = timezone(timedelta(hours=-3))
+    now = datetime.now(_arg_tz)
+    current_year = now.year
 
     # YYYY-MM-DD or YYYY/MM/DD
     m = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$', raw)
@@ -756,9 +988,17 @@ def _try_parse_date(raw: str) -> str | None:
         if 1 <= int(mo) <= 12 and 1 <= int(d) <= 31:
             return f"{y}-{mo}-{d}"
 
-    # "15 de marzo de 2025" / "15 marzo 2025"
+    # DD/MM (assume current year)
+    m = re.match(r'^(\d{1,2})[/-](\d{1,2})$', raw)
+    if m:
+        d, mo = m.group(1).zfill(2), m.group(2).zfill(2)
+        if 1 <= int(mo) <= 12 and 1 <= int(d) <= 31:
+            return f"{current_year}-{mo}-{d}"
+
+    # "15 de marzo de 2025" / "15 marzo 2025" / "15 de marzo"
     text_lower = raw.lower()
     for month_name, month_num in _MONTH_NAMES.items():
+        # With year
         m = re.match(
             rf'(\d{{1,2}})\s+(?:de\s+)?{month_name}\s+(?:de\s+)?(\d{{4}})',
             text_lower
@@ -767,6 +1007,12 @@ def _try_parse_date(raw: str) -> str | None:
             d = m.group(1).zfill(2)
             y = m.group(2)
             return f"{y}-{month_num}-{d}"
+
+        # Without year
+        m = re.match(rf'^(\d{{1,2}})\s+(?:de\s+)?{month_name}$', text_lower)
+        if m:
+            d = m.group(1).zfill(2)
+            return f"{current_year}-{month_num}-{d}"
 
         # "marzo 2025" (day unknown → use 01)
         m = re.match(rf'^{month_name}\s+(\d{{4}})$', text_lower)
@@ -864,11 +1110,12 @@ async def verify_dates(state: AgentState) -> dict:
             verified.append(event)
             continue
 
-        # Future date: discard
+        # Future date: keep but log warning
         logger.warning(
-            f"🗑️ [{event_name}] Discarded: Target date {target_date} not found on source page. "
-            f"Page dates found: {page_dates}"
+            f"⚠️ [{event_name}] Target date {target_date} not found on source page, "
+            f"but keeping it as secondary check (Page dates: {page_dates})"
         )
+        verified.append(event)
 
     logger.info(f"🔎 Date verification complete: kept {len(verified)} verified events out of {len(raw)}")
     return {"raw_events": {"type": "override", "value": verified}}
@@ -971,13 +1218,26 @@ async def generate_report(state: AgentState) -> dict:
     )
 
     report_text = response.content.strip()
-
-    if report_text.startswith("```"):
+    
+    # Robust JSON extraction: look for the first [ and last ]
+    import re
+    match = re.search(r"(\[.*\])", report_text, re.DOTALL)
+    if match:
+        report_text = match.group(1).strip()
+    elif report_text.startswith("```"):
         lines = report_text.split("\n")
         lines = [l for l in lines if not l.strip().startswith("```")]
-        report_text = "\n".join(lines)
+        report_text = "\n".join(lines).strip()
 
     logger.info(f"📄 Final report generated")
+    
+    # 🧹 Cleanup: delete synthesized cache as requested by the user
+    try:
+        context_manager = SQLiteContextManager()
+        context_manager.clear_all_context()
+    except Exception as e:
+        logger.warning(f"Failed to clear context cache: {e}")
+
     return {"final_report": report_text}
 
 
@@ -985,11 +1245,24 @@ async def generate_report(state: AgentState) -> dict:
 # Build the Graph
 # ─────────────────────────────────────────────────────
 
+def should_clarify(state: AgentState) -> str:
+    """Route through clarify on first pass; skip to plan_research if already clarified."""
+    if state.get("clarify_question"):
+        return "plan_research"
+    return "clarify"
+
+def _after_clarify(state: AgentState) -> str:
+    """If a question was generated, go to END (wait for user); otherwise, plan_research."""
+    if state.get("clarify_question"):
+        return END
+    return "plan_research"
+
 def build_graph():
     """Construct and compile the LangGraph StateGraph."""
     graph = StateGraph(AgentState)
 
     # Add nodes
+    graph.add_node("clarify", clarify)
     graph.add_node("plan_research", plan_research)
     graph.add_node("research_category", research_category)
     graph.add_node("aggregate_results", aggregate_results)
@@ -997,9 +1270,11 @@ def build_graph():
     graph.add_node("filter_argentina", filter_argentina)
     graph.add_node("generate_report", generate_report)
 
-    # Add edges — simple linear pipeline, no clarify node
-    graph.add_edge(START, "plan_research")
-    graph.add_conditional_edges("plan_research", route_to_researchers, ["research_category"])
+    # Add edges
+    graph.add_conditional_edges(START, should_clarify, ["clarify", "plan_research"])
+    graph.add_conditional_edges("clarify", _after_clarify, [END, "plan_research"])
+    
+    graph.add_conditional_edges("plan_research", send_research_tasks, ["research_category"])
     graph.add_edge("research_category", "aggregate_results")
     graph.add_edge("aggregate_results", "verify_dates")
     graph.add_edge("verify_dates", "filter_argentina")
