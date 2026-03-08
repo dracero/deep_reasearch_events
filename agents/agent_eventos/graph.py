@@ -39,20 +39,11 @@ from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import Send
 from langsmith import traceable
-import httpx
-from bs4 import BeautifulSoup
 
-from duckduckgo_search import DDGS
-
-# Optional: Tavily for better search quality
-try:
-    from tavily import TavilyClient
-    _HAS_TAVILY = bool(os.getenv("TAVILY_API_KEY"))
-except ImportError:
-    _HAS_TAVILY = False
-
-# Firecrawl API key for fallback scraping (optional)
-_FIRECRAWL_API_KEY = os.getenv("FIRECRAWL_API_KEY", "")
+# crawl4ai-based search & scraping (replaces Serper/Tavily/DDG + Jina/Firecrawl)
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+from crawl4ai_utils import crawl4ai_search, crawl4ai_scrape, crawl4ai_scrape_batch
 
 from state import (
     AgentState,
@@ -249,109 +240,30 @@ def _parse_failed_generation(error, pydantic_model):
 
 
 # ─────────────────────────────────────────────────────
-# Search: Serper (primary) + Tavily + DuckDuckGo (fallback)
+# Search & Scraping (powered by crawl4ai)
 # ─────────────────────────────────────────────────────
 
 @traceable(name="perform_search", run_type="tool")
-def _perform_search(query: str, config: Configuration, include_domains: list[str] | None = None) -> List[dict]:
-    """Execute search trying: 1) Serper, 2) Tavily, 3) DuckDuckGo fallback."""
-    # 1. SERPER FALLBACK (Google Search)
-    serper_key = os.environ.get("SERPER_API_KEY")
-    if serper_key:
-        try:
-            import requests
-
-            serper_query = query
-            if include_domains:
-                site_query = " OR ".join([f"site:{d}" for d in include_domains])
-                serper_query = f"{query} ({site_query})"
-
-            payload = json.dumps({
-                "q": serper_query,
-                "gl": "ar",  # Country code for Argentina
-                "hl": "es",  # Language
-                "num": config.search_max_results
-            })
-            headers = {
-                'X-API-KEY': serper_key,
-                'Content-Type': 'application/json'
-            }
-
-            response = requests.request("POST", "https://google.serper.dev/search", headers=headers, data=payload, timeout=15)
-            response.raise_for_status()
-            res = response.json()
-
-            formatted_results = []
-            if "organic" in res:
-                for r in res["organic"]:
-                    formatted_results.append({
-                        "title": r.get("title", ""),
-                        "url": r.get("link", ""),
-                        "content": r.get("snippet", "")
-                    })
-            if formatted_results:
-                return formatted_results
-        except Exception as e:
-            logger.warning(f"Serper search failed for '{query}': {e}. Falling back to Tavily.")
-
-    # 2. TAVILY
-    if _HAS_TAVILY:
-        try:
-            client = TavilyClient()
-            kwargs = dict(
-                query=query,
-                max_results=config.tavily_max_results,
-                search_depth=config.tavily_search_depth,
-                include_answer=True,
-            )
-            if include_domains:
-                kwargs["include_domains"] = include_domains
-            response = client.search(**kwargs)
-            results = response.get("results", [])
-            if results:
-                return results
-        except Exception as e:
-            logger.warning(f"Tavily search failed for '{query}': {e}. Falling back to DuckDuckGo.")
-
-    # 3. DUCK DUCK GO FALLBACK
-    return _ddg_search(query, config, include_domains)
+async def _perform_search(query: str, config: Configuration, include_domains: list[str] | None = None) -> List[dict]:
+    """Execute search using crawl4ai (scrapes Google/DDG HTML)."""
+    return await crawl4ai_search(
+        query=query,
+        max_results=config.search_max_results,
+        include_domains=include_domains,
+    )
 
 
-@traceable(name="ddg_search", run_type="tool")
-def _ddg_search(query: str, config: Configuration, include_domains: list[str] | None = None) -> List[dict]:
-    """Execute a DuckDuckGo search and return formatted results."""
-    try:
-        from langchain_community.tools import DuckDuckGoSearchResults
-        from langchain_community.utilities import DuckDuckGoSearchAPIWrapper
-
-        ddgs_query = query
-        if include_domains:
-            site_query = " OR ".join([f"site:{d}" for d in include_domains])
-            ddgs_query = f"{query} ({site_query})"
-
-        wrapper = DuckDuckGoSearchAPIWrapper(max_results=config.search_max_results)
-        search = DuckDuckGoSearchResults(api_wrapper=wrapper, output_format="list")
-        res = search.invoke(ddgs_query)
-
-        formatted_results = []
-        for r in res:
-            formatted_results.append({
-                "title": r.get("title", ""),
-                "url": r.get("link", ""),
-                "content": r.get("snippet", "")
-            })
-        return formatted_results
-    except Exception as e:
-        logger.error(f"DuckDuckGo search failed for '{query}': {e}")
-        return []
+async def _scrape_spa_evento(url: str) -> str:
+    """Scrape an SPA page using crawl4ai (replaces Jina/Firecrawl)."""
+    return await crawl4ai_scrape(url)
 
 
 # ─────────────────────────────────────────────────────
 # Sitios y configuración de búsqueda
 # ─────────────────────────────────────────────────────
 
-# Dominios para DuckDuckGo (site: restricciones)
-SITES_DDG = [
+# Dominios SPA que requieren JS rendering
+SITES_SPA = [
     "netflix.com",
     "disneyplus.com",
     "primevideo.com",
@@ -363,9 +275,9 @@ SITES_DDG = [
     "eventick.com.ar",
 ]
 
-# URLs a scrapear directamente con Firecrawl (o Jina como fallback)
+# URLs a scrapear directamente con crawl4ai
 # Cada entrada: { "nombre", "url", "categoria" }
-FIRECRAWL_TARGETS = [
+SCRAPE_TARGETS = [
     {
         "nombre":    "Netflix Novedades",
         "url":       "https://www.netflix.com/ar/whats-new",
@@ -420,111 +332,12 @@ QUERIES_BASE = [
 ]
 MAX_RESULTS_PER_QUERY = 5
 
-# ─── Patrones regex para fecha y hora ─────────────────────────────────────────
 
-DATE_PATTERNS = [
-    r"\b(\d{4}[-/]\d{1,2}[-/]\d{1,2})\b",
-    r"\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b",
-    r"\b(\d{1,2}[/-]\d{1,2})\b", # DD/MM
-    r"\b(\d{1,2}\s+de\s+\w+\s+(?:de\s+)?\d{4})\b",
-    r"\b(\d{1,2}\s+de\s+\w+)\b", # DD de mes
-    r"\b(\d{1,2}\s+\w+\s+\d{4})\b",
-    r"\b(\d{1,2}\s+\w+)\b", # DD mes
-    r"\b((?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre"
-    r"|january|february|march|april|may|june|july|august|september|october|november|december)"
-    r"\s+\d{4})\b",
-]
-TIME_PATTERNS = [
-    r"\b(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?)\b",
-    r"a\s+las\s+(\d{1,2}(?::\d{2})?)\s*h(?:s|oras?)?",
-]
-
-
-# ─────────────────────────────────────────────────────
-# SPA Scraping: Jina Reader (primary) + Firecrawl (fallback)
-# ─────────────────────────────────────────────────────
-
-
-async def _scrape_with_jina(url: str) -> str:
-    """Scrape a page using Jina Reader API (r.jina.ai).
-    Free, handles JS-rendered pages, returns clean markdown."""
-    jina_url = f"https://r.jina.ai/{url}"
-    try:
-        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-            resp = await client.get(
-                jina_url,
-                headers={
-                    "Accept": "text/plain",
-                    "X-No-Cache": "true",
-                },
-            )
-            resp.raise_for_status()
-            text = resp.text.strip()
-            if text and len(text) > 50:
-                return text[:5000]
-    except Exception as e:
-        logger.warning(f"Jina Reader failed for {url}: {e}")
-    return ""
-
-
-async def _scrape_with_firecrawl(url: str) -> str:
-    """Scrape a page using Firecrawl API (fallback).
-    Requires FIRECRAWL_API_KEY env var."""
-    if not _FIRECRAWL_API_KEY:
-        return ""
-    try:
-        async with httpx.AsyncClient(timeout=20.0) as client:
-            resp = await client.post(
-                "https://api.firecrawl.dev/v1/scrape",
-                headers={
-                    "Authorization": f"Bearer {_FIRECRAWL_API_KEY}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "url": url,
-                    "formats": ["markdown"],
-                },
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            md = data.get("data", {}).get("markdown", "")
-            if md and len(md) > 50:
-                return md[:5000]
-    except Exception as e:
-        logger.warning(f"Firecrawl failed for {url}: {e}")
-    return ""
-
-
-async def _scrape_spa_evento(url: str) -> str:
-    """Scrape an SPA page using Jina Reader (primary) + Firecrawl (fallback)."""
-    text = await _scrape_with_jina(url)
-    if text and len(text) > 800:
-        logger.info(f"✅ Jina Reader scraped {url} ({len(text)} chars)")
-        return text
-    
-    if text:
-        logger.warning(f"⚠️ Jina Reader returned too little content ({len(text)} chars) for {url}. Falling back to Firecrawl.")
-
-    text = await _scrape_with_firecrawl(url)
-    if text:
-        logger.info(f"✅ Firecrawl scraped {url} ({len(text)} chars)")
-        return text
-
-    logger.warning(f"⚠️ Both Jina Reader and Firecrawl failed for {url}")
-    return ""
-
-
-# ─────────────────────────────────────────────────────
-# Firecrawl Target Scraping
-# ─────────────────────────────────────────────────────
-
-async def _scrape_firecrawl_targets(category: str, user_provider: Optional[str] = None) -> List[dict]:
-    """Scrape all FIRECRAWL_TARGETS matching the given category.
-    Uses Jina Reader (primary) + Firecrawl (fallback) and returns
-    results formatted like search results for the LLM.
+async def _scrape_targets(category: str, user_provider: Optional[str] = None) -> List[dict]:
+    """Scrape all SCRAPE_TARGETS matching the given category using crawl4ai.
     If user_provider is specified, only targets whose name
     contains the provider will be scraped."""
-    targets = [t for t in FIRECRAWL_TARGETS if t["categoria"] == category]
+    targets = [t for t in SCRAPE_TARGETS if t["categoria"] == category]
     if user_provider:
         prov_lower = user_provider.lower()
         targets = [t for t in targets if prov_lower in t["nombre"].lower()]
@@ -532,21 +345,21 @@ async def _scrape_firecrawl_targets(category: str, user_provider: Optional[str] 
     if not targets:
         return []
 
+    urls = [t["url"] for t in targets]
+    logger.info(f"🕷️ [{category}] Scraping {len(urls)} targets with crawl4ai...")
+    scraped_texts = await crawl4ai_scrape_batch(urls)
+
     results = []
-    for target in targets:
-        url = target["url"]
-        nombre = target["nombre"]
-        logger.info(f"🔥 [{category}] Scraping Firecrawl target: {nombre} ({url})")
-        text = await _scrape_spa_evento(url)
+    for target, text in zip(targets, scraped_texts):
         if text:
             results.append({
-                "title": nombre,
-                "url": url,
+                "title": target["nombre"],
+                "url": target["url"],
                 "content": text,
             })
-            logger.info(f"✅ [{category}] Firecrawl target '{nombre}': {len(text)} chars")
+            logger.info(f"✅ [{category}] Target '{target['nombre']}': {len(text)} chars")
         else:
-            logger.warning(f"⚠️ [{category}] Firecrawl target '{nombre}' returned no content")
+            logger.warning(f"⚠️ [{category}] Target '{target['nombre']}' returned no content")
 
     return results
 
@@ -729,9 +542,8 @@ async def research_category(state: ResearcherState) -> dict:
 
     # 1. Execute all searches for this category
     all_results = []
-    loop = asyncio.get_event_loop()
     for query in queries:
-        results = await loop.run_in_executor(None, _perform_search, query, config, domains)
+        results = await _perform_search(query, config, domains)
         all_results.extend(results)
         logger.info(f"🔍 [{category}] Query '{query}': {len(results)} results")
 
@@ -744,41 +556,40 @@ async def research_category(state: ResearcherState) -> dict:
         ]
         for eq in _extra_streaming_queries:
             if eq not in queries:
-                extra_results = await loop.run_in_executor(None, _perform_search, eq, config, None)
+                extra_results = await _perform_search(eq, config, None)
                 all_results.extend(extra_results)
                 logger.info(f"🔍 [{category}] Extra query '{eq}': {len(extra_results)} results")
 
     # 1c. For deportes, guarantee we fetch the day's agenda/fixture
     if category == "deportes" and not user_prov:
         _extra_deportes_queries = [
-            f"site:promiedos.com.ar primera division {target_date}",
-            f"site:promiedos.com.ar seleccion argentina {target_date}",
-            f"site:promiedos.com.ar libertadores sudamericana {target_date}",
-            f"site:promiedos.com.ar fixture futbol {target_date}",
+            f"promiedos primera division fixture {target_date}",
+            f"fixture futbol argentino {target_date}",
+            f"partidos libertadores sudamericana {target_date}",
         ]
         for eq in _extra_deportes_queries:
             if eq not in queries:
-                extra_results = await loop.run_in_executor(None, _perform_search, eq, config, None)
+                extra_results = await _perform_search(eq, config, None)
                 all_results.extend(extra_results)
                 logger.info(f"🔍 [{category}] Extra query '{eq}': {len(extra_results)} results")
 
-    # 1d. Scrape Firecrawl targets for this category
-    firecrawl_results = await _scrape_firecrawl_targets(category, user_provider=user_prov)
-    if firecrawl_results:
-        all_results.extend(firecrawl_results)
-        logger.info(f"🔥 [{category}] Added {len(firecrawl_results)} Firecrawl target results")
+    # 1d. Scrape targets for this category with crawl4ai
+    target_results = await _scrape_targets(category, user_provider=user_prov)
+    if target_results:
+        all_results.extend(target_results)
+        logger.info(f"🕷️ [{category}] Added {len(target_results)} crawl4ai target results")
 
     if not all_results:
         logger.info(f"⚠️  [{category}] No search results found")
         return {"raw_events": []}
 
-    # 2. Enrich SPA results with Jina Reader/Firecrawl
+    # 2. Enrich SPA results with crawl4ai
     enriched_results = []
     for r in all_results:
         url = r.get("url", "")
-        is_spa = any(d in url.lower() for d in SITES_DDG)
+        is_spa = any(d in url.lower() for d in SITES_SPA)
         if is_spa:
-            logger.info(f"🌐 [{category}] SPA scraping (Jina/Firecrawl): {url}")
+            logger.info(f"🌐 [{category}] SPA scraping (crawl4ai): {url}")
             scraped = await _scrape_spa_evento(url)
             if scraped:
                 r = {**r, "content": scraped}
@@ -933,6 +744,23 @@ def aggregate_results(state: AgentState) -> dict:
 # Node: Verify Dates via Scraping
 # ─────────────────────────────────────────────────────
 
+import re
+
+DATE_PATTERNS = [
+    r'\b(\d{1,2}[/-]\d{1,2}[/-]\d{4})\b',
+    r'\b(\d{4}[/-]\d{1,2}[/-]\d{1,2})\b',
+    r'\b(\d{1,2}[/-]\d{1,2})\b',
+    r'\b(\d{1,2}\s+(?:de\s+)?[A-Za-z]+\s+(?:de\s+)?\d{4})\b',
+    r'\b(\d{1,2}\s+(?:de\s+)?[A-Za-z]+)\b',
+    r'\b([A-Za-z]+\s+\d{4})\b',
+]
+
+TIME_PATTERNS = [
+    r'\b(\d{1,2}:\d{2}(?:\s*[aApP][mM])?)\b',
+    r'\b(\d{1,2}\s*[aApP][mM])\b',
+    r'\b(\d{1,2}hs)\b'
+]
+
 _MONTH_NAMES = {
     'enero': '01', 'febrero': '02', 'marzo': '03', 'abril': '04',
     'mayo': '05', 'junio': '06', 'julio': '07', 'agosto': '08',
@@ -1023,22 +851,9 @@ def _try_parse_date(raw: str) -> str | None:
 
 
 async def _scrape_url(url: str, timeout: float = 8.0) -> str:
-    """Fetch a URL and return the visible text content."""
-    try:
-        async with httpx.AsyncClient(
-            timeout=timeout,
-            follow_redirects=True,
-            headers={'User-Agent': 'Mozilla/5.0 (compatible; DeepResearchBot/1.0)'}
-        ) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            for tag in soup(['script', 'style', 'nav', 'footer', 'header', 'aside']):
-                tag.decompose()
-            return soup.get_text(separator=' ', strip=True)[:2500]
-    except Exception as e:
-        logger.debug(f"Could not scrape {url}: {e}")
-        return ""
+    """Fetch a URL and return the visible text content using crawl4ai."""
+    text = await crawl4ai_scrape(url, max_chars=2500)
+    return text
 
 
 async def verify_dates(state: AgentState) -> dict:

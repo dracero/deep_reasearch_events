@@ -5,9 +5,8 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "crawl4ai>=0.8.0",
     "fastapi>=0.134.0",
-    "langchain-community>=0.4.1",
-    "langchain-google-genai>=2.0.0",
     "langchain-groq>=1.1.2",
     "langgraph>=1.0.9",
     "langsmith>=0.7.6",

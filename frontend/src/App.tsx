@@ -20,8 +20,10 @@ function App() {
   const [isSearching, setIsSearching] = useState(false);
 
   // Conversation context tracking — used to bypass the intent router on follow-ups
-  const [activeAgent, setActiveAgent] = useState<string>('');       // 'viajes' | 'eventos' | ''
-  const [travelContext, setTravelContext] = useState<Record<string, string>>({});
+  const [activeAgent, setActiveAgent] = useState<string>('');       // 'explainer' | 'eventos' | ''
+  const [isWaitingForInput, setIsWaitingForInput] = useState(false); // true = agent asked a question
+  const [explainerContext, setExplainerContext] = useState<Record<string, string>>({});
+  const [eventosContext, setEventosContext] = useState<Record<string, string>>({});
 
   // Guardamos el historial de la conversación {role: 'user' | 'assistant', content: string}
   const [chatHistory, setChatHistory] = useState<{ role: string, content: string }[]>([]);
@@ -48,22 +50,31 @@ function App() {
 
     setChatMessage('');
 
-    // Determine if this is a follow-up (active agent set) or a new search
-    const isFollowUp = activeAgent !== '';
-    // If it's a brand-new query (no active agent), reset context
+    // If the agent is NOT waiting for a reply (i.e. the previous interaction
+    // finished), clear the active agent so the router decides the intent fresh.
+    // If the agent IS waiting (asked a clarification question), keep the bypass.
+    const isFollowUp = activeAgent !== '' && isWaitingForInput;
     if (!isFollowUp) {
-      setTravelContext({});
+      setActiveAgent('');
+      setExplainerContext({});
+      setEventosContext({});
     }
 
     try {
+      // Compute the values to send BEFORE React state updates take effect
+      const agentToSend = isFollowUp ? activeAgent : '';
+      const explainerCtxToSend = isFollowUp ? explainerContext : {};
+      const eventosCtxToSend = isFollowUp ? eventosContext : {};
+
       const response = await fetch('http://localhost:8000/api/chat', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: sendMsg,
-          history: currentHistory, // Enviamos el historial previo
-          active_agent: activeAgent,  // Tells the orchestrator to bypass LLM router
-          travel_context: travelContext,
+          history: currentHistory,
+          active_agent: agentToSend,
+          explainer_context: explainerCtxToSend,
+          eventos_context: eventosCtxToSend,
         }),
         // No AbortController/signal — let the stream run as long as the backend needs
       });
@@ -99,26 +110,43 @@ function App() {
               // Track which agent is now active so follow-ups are routed correctly
               if (event.component === 'AgentBadge') {
                 const agentName: string = (event.props.agent_name || '').toLowerCase();
-                if (agentName.includes('viajes')) {
-                  setActiveAgent('viajes');
+                if (agentName.includes('explainer')) {
+                  setActiveAgent('explainer');
                 } else if (agentName.includes('eventos')) {
                   setActiveAgent('eventos');
                 }
               }
-              // When an AgentQuestion appears, the agent is waiting for a follow-up
+              // When an AgentQuestion appears, the agent is waiting for user input.
               if (event.component === 'AgentQuestion') {
-                setActiveAgent('viajes'); // Only the travel agent asks questions currently
+                setIsWaitingForInput(true);
               }
-              // Accumulate travel context from orchestrator ContextUpdate events
-              if (event.component === 'ContextUpdate' && event.props?.context) {
-                setTravelContext(prev => ({ ...prev, ...event.props.context }));
+              if (event.component === 'ContextUpdate') {
+                if (event.props?.agent === 'eventos') {
+                   setEventosContext(prev => ({ ...prev, ...event.props.context }));
+                } else {
+                   setExplainerContext(prev => ({ ...prev, ...event.props.context }));
+                }
               }
-              // When results arrive, the conversation is complete — clear active agent
+              // When final results arrive from eventos agents, close the conversation.
+              // For the explainer, AgentChatText means "answered, ready for more questions"
+              // so we keep isWaitingForInput=true to allow follow-up questions.
               if (event.component === 'TravelRoutes' || event.component === 'EventTable') {
-                setActiveAgent('');
+                setIsWaitingForInput(false);
+              }
+              if (event.component === 'AgentChatText') {
+                // Keep chat open: the explainer emits input_required after answering
+                setIsWaitingForInput(true);
               }
             } catch (err) {
-              console.error("Error parseando evento A2UI:", err, "raw:", dataStr);
+              // If JSON parsing fails, it's likely raw text (like Markdown from the explainer agent)
+              // Wrap it in a faux-UI component so it renders in the chat
+              console.log("Not JSON, treating as raw text:", dataStr);
+              const textEvent: A2UIEvent = {
+                type: 'ui',
+                component: 'AgentChatText',
+                props: { text: dataStr }
+              };
+              setAgentComponents(prev => [...prev, textEvent]);
             }
           }
         }
@@ -153,6 +181,14 @@ function App() {
             </div>
           </div>
         );
+      case 'AgentChatText':
+        return (
+          <div key={index} className="w-full max-w-[1200px] flex justify-start my-4 mx-auto">
+            <div className="p-4 bg-slate-800 text-slate-200 border border-slate-700 rounded-2xl rounded-tl-none shadow-lg max-w-[80%] whitespace-pre-wrap">
+              {event.props.text}
+            </div>
+          </div>
+        );
       case 'AgentBadge':
         return <AgentBadge key={index} {...event.props} />;
       case 'LoadingState':
@@ -167,6 +203,8 @@ function App() {
         return <AgentQuestion key={index} {...event.props} />;
       case 'ErrorState':
         return <ErrorState key={index} {...event.props} />;
+      case 'ContextUpdate':
+        return null;
       default:
         return (
           <div key={index} className="p-4 bg-slate-800 rounded-lg text-slate-400 text-sm my-2">

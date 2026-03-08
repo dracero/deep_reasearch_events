@@ -3,6 +3,10 @@ import React from 'react';
 interface RouteOption {
     ranking: number;
     ruta: string;
+    origen_real?: string;
+    destino_real?: string;
+    horario_salida?: string;
+    horario_llegada?: string;
     transporte: string;
     precio_usd: string;
     duracion_total: string;
@@ -38,6 +42,8 @@ const TravelRoutes: React.FC<Props> = ({ routes }) => {
                         <tr>
                             <th className="px-4 py-3">#</th>
                             <th className="px-4 py-3">Ruta</th>
+                            <th className="px-4 py-3">Origen / Destino</th>
+                            <th className="px-4 py-3">Horarios</th>
                             <th className="px-4 py-3">Transporte</th>
                             <th className="px-4 py-3 text-emerald-400 text-right">Precio</th>
                             <th className="px-4 py-3">Duración</th>
@@ -50,6 +56,18 @@ const TravelRoutes: React.FC<Props> = ({ routes }) => {
                             <tr key={idx} className="border-b border-slate-700/50 hover:bg-slate-700/30 transition-colors">
                                 <td className="px-4 py-3 font-bold text-slate-500">{route.ranking || idx + 1}</td>
                                 <td className="px-4 py-3 font-medium text-slate-200">{route.ruta}</td>
+                                <td className="px-4 py-3">
+                                    <div className="flex flex-col">
+                                        <span className="text-slate-200 font-medium whitespace-nowrap">{route.origen_real || '-'}</span>
+                                        <span className="text-slate-500 whitespace-nowrap">→ {route.destino_real || '-'}</span>
+                                    </div>
+                                </td>
+                                <td className="px-4 py-3">
+                                    <div className="flex flex-col whitespace-nowrap">
+                                        <span className="text-indigo-300">{route.horario_salida || '-'}</span>
+                                        <span className="text-indigo-400/80">{route.horario_llegada || '-'}</span>
+                                    </div>
+                                </td>
                                 <td className="px-4 py-3">{route.transporte}</td>
                                 <td className="px-4 py-3 font-bold text-emerald-400 text-right">{route.precio_usd}</td>
                                 <td className="px-4 py-3 text-slate-400">{route.duracion_total}</td>

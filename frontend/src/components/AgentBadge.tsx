@@ -7,9 +7,9 @@ interface Props {
 
 const AgentBadge: React.FC<Props> = ({ agent_name }) => {
     // Configuración de colores dinámica
-    const isViajes = agent_name.toLowerCase().includes('viajes') || agent_name.toLowerCase().includes('travel');
-    const gradient = isViajes ? "from-blue-500 to-indigo-600" : "from-emerald-500 to-teal-600";
-    const bgBadge = isViajes ? "bg-blue-500/10 text-blue-400 border-blue-500/30" : "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
+    const isExplainer = agent_name.toLowerCase().includes('explainer');
+    const gradient = isExplainer ? "from-blue-500 to-indigo-600" : "from-emerald-500 to-teal-600";
+    const bgBadge = isExplainer ? "bg-blue-500/10 text-blue-400 border-blue-500/30" : "bg-emerald-500/10 text-emerald-400 border-emerald-500/30";
 
     return (
         <div className={`w-full max-w-4xl flex items-center gap-3 p-4 mb-2 rounded-xl border bg-slate-800/60 shadow-lg ${bgBadge}`}>

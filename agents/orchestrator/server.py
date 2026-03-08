@@ -38,8 +38,9 @@ app.add_middleware(
 class ChatRequest(BaseModel):
     message: str
     history: List[Dict[str, str]] = []
-    active_agent: str = ""   # "viajes" | "eventos" | "" — bypass the router when set
-    travel_context: dict = {}  # Carry over origin/destination from the previous turn
+    active_agent: str = ""   # "explainer" | "eventos" | "" — bypass the router when set
+    explainer_context: dict = {}  # Carry over url/topic from the previous turn
+    eventos_context: dict = {} # Carry over target_date/user_category/user_provider from the previous turn
 
 
 async def stream_a2a_agent(agent_name: str, url: str, params: dict) -> AsyncGenerator[str, None]:
@@ -101,16 +102,45 @@ async def stream_a2a_agent(agent_name: str, url: str, params: dict) -> AsyncGene
                     yield f"data: {json.dumps({'type': 'ui', 'component': 'LoadingState', 'props': {'message': f'({agent_name}) {status_str}'}})}\n\n"
                 elif isinstance(update, TaskArtifactUpdateEvent):
                     for part in update.artifact.parts:
+                        raw_text = ""
                         if hasattr(part, 'root') and isinstance(part.root, TextPart):
-                            yield f"data: {part.root.text}\n\n"
+                            raw_text = part.root.text
                         elif isinstance(part, TextPart):
-                            yield f"data: {part.text}\n\n"
+                            raw_text = part.text
+
+                        if raw_text:
+                            # If text is valid JSON (a UI component), forward as-is.
+                            # Otherwise wrap plain text in AgentChatText so newlines
+                            # don't break SSE framing.
+                            try:
+                                json.loads(raw_text)
+                                yield f"data: {raw_text}\n\n"
+                            except (json.JSONDecodeError, TypeError):
+                                wrapped = json.dumps({
+                                    'type': 'ui',
+                                    'component': 'AgentChatText',
+                                    'props': {'text': raw_text},
+                                })
+                                yield f"data: {wrapped}\n\n"
             elif isinstance(event, Message):
                 for part in event.parts:
+                    raw_text = ""
                     if hasattr(part, 'root') and isinstance(part.root, TextPart):
-                        yield f"data: {part.root.text}\n\n"
+                        raw_text = part.root.text
                     elif isinstance(part, TextPart):
-                        yield f"data: {part.text}\n\n"
+                        raw_text = part.text
+
+                    if raw_text:
+                        try:
+                            json.loads(raw_text)
+                            yield f"data: {raw_text}\n\n"
+                        except (json.JSONDecodeError, TypeError):
+                            wrapped = json.dumps({
+                                'type': 'ui',
+                                'component': 'AgentChatText',
+                                'props': {'text': raw_text},
+                            })
+                            yield f"data: {wrapped}\n\n"
 
     except Exception as e:
         logger.error(f"Error calling {url}: {e}", exc_info=True)
@@ -125,38 +155,31 @@ async def unified_chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]
     """
     message = request.message
     active_agent = request.active_agent
-    travel_context = request.travel_context
+    explainer_context = request.explainer_context
 
     yield f"data: {json.dumps({'type': 'ui', 'component': 'LoadingState', 'props': {'message': 'Orquestando agentes...'}})}\n\n"
 
     # --- Shortcut: If the frontend already knows which agent is in context,
     # skip the LLM router entirely. This prevents follow-up answers (e.g., "la segunda de junio")
     # from being misclassified as a new unrelated intent.
-    if active_agent == "viajes":
-        intent = "viajes"
-        # Accumulate params: keep what we already know, fill in the missing field
-        prev_origin = travel_context.get("origin", "")
-        prev_destination = travel_context.get("destination", "")
-        prev_dates = travel_context.get("travel_dates", "")
-
+    if active_agent == "explainer":
+        intent = "explainer"
+        # Accumulate params from frontend explainer_context without naively assuming the new message maps to a specific field.
+        # The Clarify node in the explainer agent will use its LLM on `user_message_raw` to extract missing fields.
         decision = {
-            "intent": "viajes",
-            "origin": prev_origin,
-            "destination": prev_destination,
-            "travel_dates": prev_dates,
+            "intent": "explainer",
+            "url": explainer_context.get("url", ""),
+            "question": explainer_context.get("question", ""),
         }
-        # The user's reply fills whichever critical field is still empty
-        if not decision["destination"]:
-            decision["destination"] = message
-        elif not decision["travel_dates"]:
-            decision["travel_dates"] = message
-        else:
-            # Both present — treat the reply as raw text for the agent to interpret
-            decision["travel_dates"] = message
         logger.info(f"[⚡️ Bypass] Active agent is '{active_agent}' — skipping LLM router.")
     elif active_agent == "eventos":
         intent = "eventos"
-        decision = {"intent": "eventos", "target_date": message}
+        decision = {
+            "intent": "eventos", 
+            "target_date": request.eventos_context.get("target_date", ""),
+            "user_category": request.eventos_context.get("user_category", ""),
+            "user_provider": request.eventos_context.get("user_provider", "")
+        }
         logger.info(f"[⚡️ Bypass] Active agent is '{active_agent}' — skipping LLM router.")
     else:
         decision = await determine_intent(message, request.history)
@@ -166,33 +189,48 @@ async def unified_chat_stream(request: ChatRequest) -> AsyncGenerator[str, None]
 
     if intent == "conversacional":
         # Atajo: respondemos directamente sin llamar a los agentes
-        respuesta = decision.get("text_response", "¡Hola! Estoy acá para ayudarte con búsquedas de eventos o viajes. ¿Qué necesitas?")
+        respuesta = decision.get("text_response", "¡Hola! Estoy acá para ayudarte con búsqueda de eventos o a explicarte el contenido de algún link web. ¿Qué necesitas?")
         yield f"data: {json.dumps({'type': 'ui', 'component': 'AgentBadge', 'props': {'agent_name': 'Orchestrator'}})}\n\n"
         yield f"data: {json.dumps({'type': 'ui', 'component': 'UserChat', 'props': {'message': respuesta}})}\n\n"
         return
 
     if intent in ["eventos", "ambos"]:
-        # Params para el Agente Eventos — sin defaults duros para que Clarify funcione
+        # Params para el Agente Eventos
         params = {
             "target_date": decision.get("target_date", ""),
+            "categoria_evento": decision.get("user_category", ""),
+            "proveedor_esperado": decision.get("user_provider", ""),
             "user_message_raw": message,
         }
         async for sse in stream_a2a_agent("Agent Eventos", AGENT_URLS["eventos"], params):
             yield sse
+        # Emit accumulated context so the frontend can carry it to the next turn (Clarification loop)
+        ctx = {"target_date": params["target_date"], "user_category": params["categoria_evento"], "user_provider": params["proveedor_esperado"], "agent": "eventos"}
+        yield f"data: {json.dumps({'type': 'ui', 'component': 'ContextUpdate', 'props': {'context': ctx, 'agent': 'eventos'}})}\n\n"
 
-    if intent in ["viajes", "ambos"]:
-        # Params para Agente Viajes sin defaults duros para permitir que Clarify funcione
+    if intent in ["explainer", "ambos"]:
+        # Params para Agente Explainer
         params = {
-            "origin": decision.get("origin", ""),
-            "destination": decision.get("destination", ""),
-            "travel_dates": decision.get("travel_dates", ""),
-            "user_message_raw": message, # Necesario para que el nodo Clarify sepa qué dijo el usuario
+            "url": decision.get("url", ""),
+            "question": decision.get("question", decision.get("topic", "")),
+            "user_message_raw": message,
         }
-        async for sse in stream_a2a_agent("Agent Viajes", AGENT_URLS["viajes"], params):
+        # Track the last ContextUpdate emitted by the agent so we don't overwrite it
+        last_agent_ctx = {}
+        async for sse in stream_a2a_agent("Agent Explainer", AGENT_URLS["explainer"], params):
             yield sse
-        # Emit accumulated context so the frontend can carry it to the next turn
-        ctx = {"origin": params["origin"], "destination": params["destination"], "travel_dates": params["travel_dates"]}
-        yield f"data: {json.dumps({'type': 'ui', 'component': 'ContextUpdate', 'props': {'context': ctx}})}\n\n"
+            # Sniff ContextUpdate events from the agent stream
+            if sse.startswith("data: "):
+                try:
+                    _ev = json.loads(sse[6:].strip())
+                    if _ev.get("component") == "ContextUpdate" and _ev.get("props", {}).get("agent") == "explainer":
+                        last_agent_ctx = _ev.get("props", {}).get("context", {})
+                except (json.JSONDecodeError, TypeError):
+                    pass
+        # Only emit a fallback ContextUpdate if the agent didn't provide one
+        if not last_agent_ctx:
+            ctx = {"url": params["url"], "question": params["question"], "agent": "explainer"}
+            yield f"data: {json.dumps({'type': 'ui', 'component': 'ContextUpdate', 'props': {'context': ctx, 'agent': 'explainer'}})}\n\n"
 
 
 @app.post("/api/chat")

@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # Configuración de URLs A2A
 AGENT_URLS = {
     "eventos": "http://localhost:8001",
-    "viajes": "http://localhost:8002",
+    "explainer": "http://localhost:8002",
 }
 
 class RoutingDecision(BaseModel):
@@ -40,70 +40,58 @@ ROUTER_PROMPT = """\
 Sos el BeeAI Orchestrator de la plataforma Deep Research.
 Tu objetivo es analizar el mensaje del usuario y clasificar la intención principal (intent) para rutearlo al agente A2A correcto.
 
-AGENTES Y REGLAS DE DECISIÓN:
+AGENT Y REGLAS DE DECISIÓN:
 1. "eventos" -> El usuario quiere INFORMARSE sobre qué eventos, torneos o streamings van a ocurrir. (Ej: "¿Qué eventos hay en junio?", "¿Qué partidos juega Argentina?", "¿Cuándo es el mundial?").
-2. "viajes" -> El usuario pide EXPRESAMENTE cómo LLEGAR/VIAJAR a un destino físico. Si el mensaje central es sobre "ruta", "vuelo", "pasaje", "combinación", "precio de viaje", "ida y vuelta", O "cómo ir de X a Y", el intent **SIEMPRE ES VIAJES**. Si el usuario menciona un evento (ej. "el partido", "el recital", "el mundial") pero SOLO lo hace para dar contexto al viaje y conseguir una "ruta o vuelo" hacia allí, el intent ES SOLAMENTE VIAJES.
-3. "ambos" -> El usuario hace explícitamente DOS pedidos distintos: quiere información/conocer qué eventos hay Y TAMBIÉN quiere opciones de vuelo para ir a verlos. (Ej: "Decime qué partidos hay en Miami y buscame vuelos para ir a verlos").
-4. "conversacional" -> El usuario simplemente está saludando, despidiéndose, dando las gracias, o haciendo charla general ("hola", "cómo estás", "gracias", "quién sos"). 
+2. "explainer" -> El usuario pide EXPLICAR un contenido a partir de un link o URL. Si el mensaje central es "explicame", "resumi", "leé este link", "de qué trata el link", el intent **SIEMPRE ES EXPLAINER**.
+3. "ambos" -> El usuario hace explícitamente DOS pedidos distintos: quiere información/conocer qué eventos hay Y TAMBIÉN quiere que le expliques un link.
+4. "conversacional" -> El usuario simplemente está saludando, despidiéndose, dando las gracias, o haciendo charla general. 
+
+REGLA CRÍTICA SOBRE URLs:
+- SOLO extraé una URL si el usuario la escribió TEXTUALMENTE en su mensaje (debe contener "http://", "https://", o "www.").
+- Si el usuario NO escribió ningún link, dejá "url" como cadena VACÍA ("").
+- NUNCA inventes, adivines ni construyas URLs a partir del tema mencionado por el usuario.
 
 Respondé SOLO con este JSON estricto (no uses markdown):
 {
-  "intent": "(eventos|viajes|ambos|conversacional)",
+  "intent": "(eventos|explainer|ambos|conversacional)",
   "target_date": "YYYY-MM-DD (si aplica para eventos)",
-  "origin": "Ciudad de origen (si aplica para viajes)",
-  "destination": "Destino o Evento (si aplica para viajes)",
-  "travel_dates": "Fechas estimadas (si aplica para viajes)",
-  "text_response": "Si el intent es conversacional, escribí acá una respuesta amable y cortés para el usuario. Sino dejalo vacío."
+  "url": "URL TEXTUAL del mensaje del usuario. VACÍO si no escribió ningún link.",
+  "topic": "Tema a explicar (si aplica para explainer)",
+  "text_response": "Si el intent es conversacional, escribí acá una respuesta amable y cortés para el usuario."
 }
 """
 
 # ─── Regex patterns for zero-cost pre-routing ────────────────────────────────
 import re
 
-# Pattern: "de [city] a [city]" or "desde [city] hasta [city]" combined with
-# a travel verb or noun anywhere in the message. This fires ONLY when an explicit
-# origin+destination pair is present alongside a travel-intent phrase.
-_TRAVEL_ORIGIN_DEST_RE = re.compile(
-    r"\b(de|desde)\b.{1,50}\b(a|hasta|hacia|para)\b.{1,50}",
-    re.IGNORECASE | re.DOTALL,
-)
-_TRAVEL_VERB_RE = re.compile(
-    r"\b(viaj|volar|vuelo|pasaje|boleto|ticket|ruta|cómo ir|como ir|llegar a|"
-    r"mejor opci[oó]n para ir|la forma más barata|quiero ir a|"
-    r"trasladarme|trasladar|combinaci[oó]n de vuelos|opciones para viajar)\b",
+_EXPLAINER_RE = re.compile(
+    r"\b(explic|resumi|lee|leyendo|link|url|p[aá]gina|sitio|web)\b",
     re.IGNORECASE,
 )
 
 
-def _quick_travel_detect(user_message: str) -> dict | None:
-    """Return a viajes routing decision immediately when the message contains
-    an explicit origin+destination pair AND a travel verb/noun.
-
-    This pre-filter runs BEFORE calling the LLM to save tokens and avoid
-    misclassification when the intent is unambiguous.
-    Returns None if the message doesn't match, meaning the LLM should decide.
+def _quick_explainer_detect(user_message: str) -> dict | None:
+    """Return an explainer routing decision immediately when the message contains
+    explainer keywords like 'explicar' and 'link' or 'url'.
     """
     lower = user_message.lower()
-    has_route = bool(_TRAVEL_ORIGIN_DEST_RE.search(lower))
-    has_travel_word = bool(_TRAVEL_VERB_RE.search(lower))
+    has_explainer_word = bool(_EXPLAINER_RE.search(lower))
+    has_url_indicator = "http" in lower or "www" in lower or "link" in lower or "url" in lower
 
-    if has_route and has_travel_word:
+    if has_explainer_word and has_url_indicator:
         return {
-            "intent": "viajes",
-            "origin": "",       # Orchestrator server will still parse these from LLM context
-            "destination": "",
-            "travel_dates": "",
+            "intent": "explainer",
+            "url": "",
+            "topic": "",
         }
     return None
 
 
 async def determine_intent(user_message: str, history: list[dict] = None) -> dict:
-    # ── Zero-cost pre-filter: detect unambiguous travel requests ────────────
-    # Patterns like "viajar de X a Y" or "vuelo de X a Y" are always viajes.
-    # This avoids calling the LLM (and wasting tokens) on clear-cut cases.
-    quick_decision = _quick_travel_detect(user_message)
+    # ── Zero-cost pre-filter: detect unambiguous explainer requests ────────────
+    quick_decision = _quick_explainer_detect(user_message)
     if quick_decision:
-        logger.info(f"[Router] Quick travel detection fired → {quick_decision}")
+        logger.info(f"[Router] Quick explainer detection fired → {quick_decision}")
         return quick_decision
 
     llm = build_router_model()
@@ -155,10 +143,10 @@ async def determine_intent(user_message: str, history: list[dict] = None) -> dic
         decision = json.loads(cleaned)
 
         # Validar que el intent sea uno de los esperados
-        valid_intents = {"eventos", "viajes", "ambos", "conversacional"}
+        valid_intents = {"eventos", "explainer", "ambos", "conversacional"}
         if decision.get("intent") not in valid_intents:
-            logger.warning(f"Invalid intent '{decision.get('intent')}', defaulting to 'eventos'")
-            decision["intent"] = "eventos"
+            logger.warning(f"Invalid intent '{decision.get('intent')}', defaulting to 'explainer'")
+            decision["intent"] = "explainer"
 
         return decision
 
@@ -180,27 +168,23 @@ def _infer_intent_from_text(text: str) -> dict:
     """
     lower = text.lower()
 
-    _VIAJES_KEYWORDS = (
-        "viaj", "vuelo", "pasaje", "boleto", "ticket", "bus", "avion", "avión",
-        "ruta", "trayecto", "ida", "llegada", "salida", "cómo ir", "como ir",
-        "cuánto cuesta ir", "precio de ir", "transporte", "aerolinea", "aerolínea",
-        "jetsmart", "flybondi", "latam", "aerolíneas", "aerolineas",
+    _EXPLAINER_KEYWORDS = (
+        "explic", "resum", "url", "link", "web", "página", "sitio", "pasa",
     )
     _EVENTOS_KEYWORDS = (
         "evento", "partido", "recital", "mundial", "torneo", "concierto",
         "estreno", "show", "competencia", "liga", "copa",
     )
 
-    has_travel = any(kw in lower for kw in _VIAJES_KEYWORDS)
+    has_explainer = any(kw in lower for kw in _EXPLAINER_KEYWORDS)
     has_event = any(kw in lower for kw in _EVENTOS_KEYWORDS)
 
-    if has_travel and has_event:
-        # Both present → route to viajes since "events" is given as context for the trip
-        return {"intent": "viajes", "origin": "", "destination": "", "travel_dates": ""}
-    elif has_travel:
-        return {"intent": "viajes", "origin": "", "destination": "", "travel_dates": ""}
+    if has_explainer and has_event:
+        return {"intent": "explainer", "url": "", "topic": ""}
+    elif has_explainer:
+        return {"intent": "explainer", "url": "", "topic": ""}
     elif has_event:
         return {"intent": "eventos", "target_date": ""}
 
-    # True default if no keywords match at all
-    return {"intent": "eventos", "target_date": ""}
+    # True default if no keywords match at all. Default to explainer for testing the explainer.
+    return {"intent": "explainer", "url": "", "topic": ""}

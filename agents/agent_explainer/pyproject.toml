@@ -6,8 +6,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.132.0",
-    "langchain-community>=0.4.1",
-    "langchain-google-genai>=2.0.0",
     "langchain-groq>=1.1.2",
     "langsmith>=0.7.6",
     "langgraph>=1.0.9",
@@ -20,6 +18,5 @@ dependencies = [
     "playwright>=1.42.0",
     "beautifulsoup4>=4.12.3",
     "a2a-sdk[all]>=0.3.24",
-    "duckduckgo-search>=8.1.1",
-    "ddgs>=9.11.1",
+    "crawl4ai>=0.8.0",
 ]

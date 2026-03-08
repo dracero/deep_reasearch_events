@@ -15,7 +15,7 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from agent_card import AGENT_CARD
-from agent_executor import TravelAgentExecutor
+from agent_executor import ExplainerAgentExecutor
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-7s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 a2a_app_builder = A2AStarletteApplication(
     agent_card=AGENT_CARD,
     http_handler=DefaultRequestHandler(
-        agent_executor=TravelAgentExecutor(),
+        agent_executor=ExplainerAgentExecutor(),
         task_store=InMemoryTaskStore(),
     )
 )
@@ -44,7 +44,7 @@ app = a2a_app_builder.build(
 
 # Add a health check route
 async def health_check(request: Request) -> JSONResponse:
-    return JSONResponse({"status": "ok", "agent": "viajes", "a2a": True})
+    return JSONResponse({"status": "ok", "agent": "explainer", "a2a": True})
 
 app.routes.append(Route("/health", health_check, methods=["GET"]))
 
