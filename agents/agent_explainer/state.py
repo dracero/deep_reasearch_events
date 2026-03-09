@@ -38,6 +38,8 @@ class ExplanationResult(BaseModel):
     """Resultado del agente explicador."""
     found: bool = Field(description="True si se encontró información relevante en el contenido de la URL, False en caso contrario.")
     explanation: str = Field(description="Respuesta basada en el contenido. Si found=False, indica que no se encontró.")
+    needs_search: bool = Field(default=False, description="True si la información no está en la página y se debe buscar en la web.")
+    search_query: str = Field(default="", description="Consulta de búsqueda ideal para encontrar la información faltante.")
 
 
 # ─────────────────────────────────────
@@ -51,4 +53,5 @@ class ExplainerState(TypedDict):
     user_message_raw: str
     clarify_question: str
     scraped_content: str
+    search_results: str
     final_explanation: Optional[ExplanationResult]

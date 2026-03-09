@@ -248,13 +248,6 @@ async def crawl4ai_scrape(url: str, max_chars: int = 5000) -> str:
     run_config = CrawlerRunConfig(
         cache_mode=CacheMode.BYPASS,
         magic=True,
-        markdown_generator=DefaultMarkdownGenerator(
-            content_filter=PruningContentFilter(
-                threshold=0.4,
-                threshold_type="fixed",
-                min_word_threshold=0,
-            )
-        ),
     )
 
     try:

@@ -207,12 +207,13 @@ async def scrape_url(state: ExplainerState) -> dict:
     if not url:
         return {"scraped_content": "No URL provided."}
     
+    config = Configuration.from_env()
     logger.info(f"🌐 Scraping {url} with crawl4ai...")
     try:
         scraped_content = await crawl4ai_scrape(url)
         # Prevent oversized inputs
-        if len(scraped_content) > 40000:
-            scraped_content = scraped_content[:40000] + "\n...[TRUNCATED]..."
+        if len(scraped_content) > config.max_content_length:
+            scraped_content = scraped_content[:config.max_content_length] + "\n...[TRUNCATED]..."
         return {"scraped_content": scraped_content}
     except Exception as e:
         logger.error(f"Error scraping {url}: {e}")
@@ -226,7 +227,8 @@ async def scrape_url(state: ExplainerState) -> dict:
 def answer_question(state: ExplainerState) -> dict:
     """Uses LLM to answer the user's question based on the scraped content."""
     config = Configuration.from_env()
-    llm = _get_llm(config.planner_model, temperature=0.3)
+    # Use JSON mode explicitly to avoid the tool calling 400 Bad Request error with Groq
+    llm = _get_llm(config.answer_model, temperature=0.3).bind(response_format={"type": "json_object"})
 
     scraped_content = state.get("scraped_content", "")
     url = state.get("url", "")
@@ -253,19 +255,102 @@ def answer_question(state: ExplainerState) -> dict:
             ]
         )
         
+        # Parse JSON
+        import json
         text_output = response.content.strip() if hasattr(response, "content") else str(response)
-        
-        found = True
-        if text_output.startswith("NOT_FOUND"):
-            found = False
-            text_output = text_output.replace("NOT_FOUND", "").strip()
+        try:
+            parsed = json.loads(text_output)
+            found = parsed.get("found", True)
+            explanation = parsed.get("explanation", "")
+            needs_search = parsed.get("needs_search", False)
+            search_query = parsed.get("search_query", "")
+        except json.JSONDecodeError:
+            logger.error("Failed to parse JSON response from LLM")
+            found = True
+            explanation = text_output
+            needs_search = False
+            search_query = ""
             
-        logger.info(f"🧠 Answer generated. Found info? {found}")
+        logger.info(f"🧠 Answer generated. Found info? {found}. Needs search? {needs_search}")
         
-        return {"final_explanation": {"found": found, "explanation": text_output}}
+        return {"final_explanation": {"found": found, "explanation": explanation, "needs_search": needs_search, "search_query": search_query}}
     except Exception as e:
         logger.error(f"Answer LLM failed: {e}")
         return {"final_explanation": {"found": False, "explanation": "Lo siento, ocurrió un error analizando el contenido."}}
+
+
+# ─────────────────────────────────────────────────────
+# Node: Web Search Fallback
+# ─────────────────────────────────────────────────────
+from crawl4ai_utils import crawl4ai_search
+from prompts import SEARCH_ANSWER_PROMPT
+
+async def web_search_fallback(state: ExplainerState) -> dict:
+    """Searches the web if the LLM couldn't answer from the URL content."""
+    query = ""
+    result = state.get("final_explanation")
+    if result:
+        needs_search = result.get("needs_search", False) if isinstance(result, dict) else getattr(result, "needs_search", False)
+        if needs_search:
+            query = result.get("search_query", "") if isinstance(result, dict) else getattr(result, "search_query", "")
+    
+    if not query:
+        query = state.get("question") or state.get("user_message_raw", "")
+
+    logger.info(f"🔍 Executing web search fallback for: '{query}'")
+    
+    try:
+        results = await crawl4ai_search(query, max_results=5)
+        if not results:
+            return {"search_results": "No se encontraron resultados en la web para esta consulta."}
+        
+        # Format results
+        formatted = ""
+        for i, res in enumerate(results, 1):
+            formatted += f"[{i}] {res['title']}\nURL: {res['url']}\nContext: {res['content']}\n\n"
+            
+        return {"search_results": formatted.strip()}
+    except Exception as e:
+        logger.error(f"Web search fallback failed: {e}")
+        return {"search_results": f"Error during web search: {e}"}
+
+
+# ─────────────────────────────────────────────────────
+# Node: Answer From Search
+# ─────────────────────────────────────────────────────
+
+def answer_from_search(state: ExplainerState) -> dict:
+    """Generates the final answer using the web search results."""
+    config = Configuration.from_env()
+    llm = _get_llm(config.answer_model, temperature=0.3)
+
+    search_results = state.get("search_results", "Sin resultados.")
+    question = (
+        state.get("question")
+        or state.get("user_message_raw")
+        or "Resumen de búsqueda."
+    )
+
+    prompt = SEARCH_ANSWER_PROMPT.format(
+        question=question,
+        search_results=search_results,
+    )
+
+    try:
+        response = _invoke_with_backoff(
+            llm,
+            [
+                {"role": "system", "content": prompt},
+            ]
+        )
+        
+        text_output = response.content.strip() if hasattr(response, "content") else str(response)
+        logger.info("🧠 Answer generated from web search.")
+        
+        return {"final_explanation": {"found": True, "explanation": text_output, "needs_search": False, "search_query": ""}}
+    except Exception as e:
+        logger.error(f"Answer from search LLM failed: {e}")
+        return {"final_explanation": {"found": False, "explanation": "Lo siento, ocurrió un error generando la respuesta con la búsqueda web."}}
 
 
 # ─────────────────────────────────────────────────────
@@ -285,6 +370,15 @@ def _after_clarify(state: ExplainerState) -> str:
         return END
     return "scrape_url"
 
+def should_search(state: ExplainerState) -> str:
+    """If the LLM says needs_search, go to the web_search_fallback node."""
+    result = state.get("final_explanation")
+    if result:
+        needs_search = result.get("needs_search", False) if isinstance(result, dict) else getattr(result, "needs_search", False)
+        if needs_search:
+            return "web_search_fallback"
+    return END
+
 def build_graph():
     """Construct and compile the LangGraph StateGraph."""
     graph = StateGraph(ExplainerState)
@@ -292,11 +386,16 @@ def build_graph():
     graph.add_node("clarify", clarify)
     graph.add_node("scrape_url", scrape_url)
     graph.add_node("answer_question", answer_question)
+    graph.add_node("web_search_fallback", web_search_fallback)
+    graph.add_node("answer_from_search", answer_from_search)
 
     graph.add_conditional_edges(START, should_clarify, ["clarify", "scrape_url"])
     graph.add_conditional_edges("clarify", _after_clarify, [END, "scrape_url"])
     
     graph.add_edge("scrape_url", "answer_question")
-    graph.add_edge("answer_question", END)
+    graph.add_conditional_edges("answer_question", should_search, [END, "web_search_fallback"])
+    
+    graph.add_edge("web_search_fallback", "answer_from_search")
+    graph.add_edge("answer_from_search", END)
 
     return graph.compile()

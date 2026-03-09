@@ -24,11 +24,7 @@ graph = build_graph()
 class ExplainerAgentExecutor(AgentExecutor):
     """
     Executes web page Q&A tasks via the A2A protocol using LangGraph.
-    Caches scraped content per URL so follow-up questions don't re-scrape.
     """
-
-    # Class-level cache: URL → scraped content
-    _scraped_cache: dict[str, str] = {}
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
         """Cancel a running task — A2A required abstract method."""
@@ -79,7 +75,7 @@ class ExplainerAgentExecutor(AgentExecutor):
             user_message_raw = user_message
 
         # Check if we have cached scraped content for this URL
-        cached_content = self._scraped_cache.get(url, "") if url else ""
+        cached_content = ""
 
         initial_state = {
             "url": url,
@@ -151,17 +147,19 @@ class ExplainerAgentExecutor(AgentExecutor):
                         )
                         return
 
-                # --- scrape_url Node: cache the content ---
+                # --- scrape_url Node ---
                 if "scrape_url" in event and event["scrape_url"] is not None:
                     new_content = event["scrape_url"].get("scraped_content", "")
                     if new_content and url:
-                        self._scraped_cache[url] = new_content
-                        logger.info(f"📦 Cached scraped content for {url} ({len(new_content)} chars)")
+                        logger.info(f"📦 Scraped content ready for {url} ({len(new_content)} chars)")
 
                 # --- answer_question Node ---
                 if "answer_question" in event:
-                    result = event["answer_question"].get("final_explanation", {})
-                    explanation = result.get("explanation", "Hubo un error al generar la respuesta.")
+                    result = event["answer_question"].get("final_explanation")
+                    if isinstance(result, dict):
+                        explanation = result.get("explanation", "Hubo un error al generar la respuesta.")
+                    else:
+                        explanation = getattr(result, "explanation", "Hubo un error al generar la respuesta.")
                     
                     await event_queue.enqueue_event(
                         TaskArtifactUpdateEvent(

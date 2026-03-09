@@ -1,207 +1,64 @@
 ##############################################################################
-# ONTOLOGÍA DE VIAJES — Agent Viajes
-# Reglas de negocio para búsqueda y optimización de rutas turísticas baratas.
+# ONTOLOGÍA DE EXPLICACIÓN — Agent Explainer
+# Reglas para analizar, extraer y explicar exhaustivamente contenido de URLs.
 ##############################################################################
 
 version: "1.0"
 descripcion: >
-  Define las reglas para buscar, filtrar y rankear rutas de viaje económicas
-  desde Argentina hacia destinos turísticos. El criterio central es encontrar
-  la combinación más barata de vuelos, considerando escalas, aerolíneas low-cost
-  y rutas alternativas.
+  Define las reglas y directrices para que el agente reciba una URL, extraiga
+  su contenido mediante scraping y proporcione explicaciones profundas, detalladas
+  y precisas sobre el tema abordado en dicha página web.
 
 # ─────────────────────────────────────────────────────────────────────────────
-# TIPOS DE BÚSQUEDA
+# FOCO PRINCIPAL
 # ─────────────────────────────────────────────────────────────────────────────
-tipos_busqueda:
-
-  directo:
-    descripcion: "Vuelos sin escala desde el origen al destino"
-    fuentes_busqueda:
-      - "Google Flights"
-      - "Despegar.com"
-      - "Skyscanner"
-      - "Kayak"
-      - "Almundo"
-    aerolineas_principales_desde_argentina:
-      - "Aerolíneas Argentinas"
-      - "LATAM Airlines"
-      - "Copa Airlines"
-      - "American Airlines"
-      - "United Airlines"
-      - "Delta Air Lines"
-      - "Air France"
-      - "Iberia"
-      - "KLM"
-      - "Turkish Airlines"
-      - "Emirates"
-
-  escala:
-    descripcion: "Vuelos con 1-2 escalas que pueden resultar más baratos"
-    hubs_comunes_desde_argentina:
-      americas:
-        - ciudad: "Bogotá (BOG)"
-          aerolinea: "Avianca"
-          ventaja: "Hub central para toda América"
-        - ciudad: "Lima (LIM)"
-          aerolinea: "LATAM"
-          ventaja: "Conexiones económicas a Norteamérica"
-        - ciudad: "Panamá (PTY)"
-          aerolinea: "Copa Airlines"
-          ventaja: "Excelente hub con muchas conexiones"
-        - ciudad: "Santiago de Chile (SCL)"
-          aerolinea: "LATAM / Sky / JetSMART"
-          ventaja: "Vuelos baratos locales + conexiones internacionales"
-        - ciudad: "São Paulo (GRU)"
-          aerolinea: "LATAM / GOL / Azul"
-          ventaja: "Mayor hub de Sudamérica"
-        - ciudad: "Miami (MIA)"
-          aerolinea: "American Airlines"
-          ventaja: "Puerto de entrada a USA con muchas conexiones domésticas"
-        - ciudad: "Houston (IAH)"
-          aerolinea: "United Airlines"
-          ventaja: "Alternativa a Miami para el sur de USA"
-      europa_medio_oriente:
-        - ciudad: "Madrid (MAD)"
-          aerolinea: "Iberia / Air Europa"
-          ventaja: "Hub español con conexiones a toda Europa"
-        - ciudad: "Estambul (IST)"
-          aerolinea: "Turkish Airlines"
-          ventaja: "Hub global con precios competitivos"
-        - ciudad: "Dubai (DXB)"
-          aerolinea: "Emirates"
-          ventaja: "Conexiones a Asia y Oceanía"
-    criterio_maximo_escalas: 2
-    escala_maxima_horas: 12
-
-  low_cost:
-    descripcion: "Aerolíneas de bajo costo para tramos específicos"
-    aerolineas_argentina:
-      - nombre: "Flybondi"
-        base: "Buenos Aires (EZE)"
-        alcance: "Doméstico + regional (Brasil, Chile, Colombia, Paraguay)"
-      - nombre: "JetSMART Argentina"
-        base: "Buenos Aires / Córdoba / Mendoza"
-        alcance: "Doméstico + Chile + Perú"
-    aerolineas_regionales:
-      - nombre: "Volaris"
-        paises: ["México"]
-      - nombre: "VivaAerobus"
-        paises: ["México"]
-      - nombre: "Wingo"
-        paises: ["Colombia", "Panamá"]
-      - nombre: "SKY Airline"
-        paises: ["Chile", "Perú"]
-      - nombre: "GOL"
-        paises: ["Brasil"]
-    aerolineas_usa_europa:
-      - nombre: "Spirit Airlines"
-        paises: ["USA", "Caribe", "LatAm"]
-      - nombre: "Frontier Airlines"
-        paises: ["USA"]
-      - nombre: "Southwest Airlines"
-        paises: ["USA"]
-      - nombre: "Ryanair"
-        paises: ["Europa"]
-      - nombre: "EasyJet"
-        paises: ["Europa"]
-      - nombre: "Wizz Air"
-        paises: ["Europa"]
-    nota: >
-      Estrategia low-cost: combinar una aerolínea convencional para el tramo largo
-      (Buenos Aires → Hub) con una low-cost para el tramo corto (Hub → destino final).
-
-  alternativo:
-    descripcion: "Rutas creativas y combinaciones no convencionales"
-    estrategias:
-      aeropuertos_cercanos:
-        descripcion: >
-          Volar a un aeropuerto cercano al destino y completar con transporte
-          terrestre (bus, tren, auto).
-        ejemplos:
-          - "Volar a Newark (EWR) en vez de JFK para New York — suele ser más barato"
-          - "Volar a Fort Lauderdale (FLL) en vez de Miami (MIA)"
-          - "Volar a Girona (GRO) en vez de Barcelona (BCN)"
-          - "Volar a Beauvais (BVA) en vez de Charles de Gaulle (CDG)"
-      multi_city:
-        descripcion: >
-          Reservar vuelos multi-city que pueden ser más baratos que ida/vuelta
-          convencional al mismo aeropuerto.
-      split_ticketing:
-        descripcion: >
-          Comprar tramos separados en distintas aerolíneas si la combinación
-          resulta más barata que un solo ticket.
-        advertencia: >
-          RIESGO: Si el primer vuelo se atrasa, la segunda aerolínea NO espera.
-          Dejar al menos 4-5 horas de margen entre tramos de distintas aerolíneas.
-      fechas_flexibles:
-        descripcion: >
-          Mover las fechas ±3 días puede reducir el precio significativamente.
-          Martes y miércoles suelen ser los días más baratos para volar.
+foco_principal:
+  - "Comprensión absoluta del texto fuente."
+  - "Extracción de conceptos clave y definiciones."
+  - "Generación de resúmenes estructurados y fáciles de leer."
+  - "Identificación de ejemplos prácticos o fragmentos de código."
+  - "Ausencia de alucinaciones: basarse ESTRICTAMENTE en el contenido de la URL."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# DESTINOS ESPECIALES (EVENTOS)
+# TIPOS DE EXPLICACIÓN
 # ─────────────────────────────────────────────────────────────────────────────
-destinos_evento:
-  mundial_2026:
-    nombre: "Copa del Mundo FIFA 2026"
-    paises: ["USA", "México", "Canadá"]
-    sedes_usa:
-      - ciudad: "New York / New Jersey"
-        aeropuerto: "JFK / EWR"
-      - ciudad: "Los Angeles"
-        aeropuerto: "LAX"
-      - ciudad: "Miami"
-        aeropuerto: "MIA"
-      - ciudad: "Houston"
-        aeropuerto: "IAH"
-      - ciudad: "Dallas"
-        aeropuerto: "DFW"
-      - ciudad: "Atlanta"
-        aeropuerto: "ATL"
-      - ciudad: "Philadelphia"
-        aeropuerto: "PHL"
-      - ciudad: "Seattle"
-        aeropuerto: "SEA"
-      - ciudad: "San Francisco Bay Area"
-        aeropuerto: "SFO"
-      - ciudad: "Kansas City"
-        aeropuerto: "MCI"
-      - ciudad: "Boston / Foxborough"
-        aeropuerto: "BOS"
-    sedes_mexico:
-      - ciudad: "Ciudad de México"
-        aeropuerto: "MEX"
-      - ciudad: "Guadalajara"
-        aeropuerto: "GDL"
-      - ciudad: "Monterrey"
-        aeropuerto: "MTY"
-    sedes_canada:
-      - ciudad: "Toronto"
-        aeropuerto: "YYZ"
-      - ciudad: "Vancouver"
-        aeropuerto: "YVR"
-    fechas: "2026-06-11 a 2026-07-19"
-    nota: >
-      Para Argentina, conviene buscar vuelos a las sedes donde juegue
-      la selección. Fase de grupos en junio, eliminatorias en julio.
+tipos_explicacion:
+  general:
+    descripcion: "Resumen exhaustivo del contenido principal de la página."
+    elementos_requeridos:
+      - "Tema central"
+      - "Puntos clave"
+      - "Conclusiones"
+    cuando_usar: "Cuando el usuario pide 'explicame de qué se trata' o no especifica un enfoque."
+
+  tecnica:
+    descripcion: "Análisis profundo enfocado en código, arquitecturas o APIs."
+    elementos_requeridos:
+      - "Casos de uso técnicos"
+      - "Snippets de código bien formateados (conservando el lenguaje)"
+      - "Explicación paso a paso de la implementación"
+    cuando_usar: "Para documentación de software, tutoriales técnicos, artículos de programación."
+
+  especifica:
+    descripcion: "Respuesta directa a una pregunta concreta sobre el contenido de la URL."
+    elementos_requeridos:
+      - "Respuesta directa y al grano"
+      - "Contexto adicional si es valioso"
+    cuando_usar: "Cuando el usuario incluyó una pregunta específica en su mensaje."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# EXCLUSIONES GLOBALES
+# REGLAS DE ORO
 # ─────────────────────────────────────────────────────────────────────────────
-exclusiones:
-  - "Rutas con más de 3 escalas"
-  - "Escalas mayores a 12 horas (salvo que sea overnight intencional y se indique)"
-  - "Aerolíneas sancionadas o con prohibición de vuelo vigente"
-  - "Vuelos chárter sin disponibilidad pública"
-  - "Precios que no incluyan tasas e impuestos (indicar si es el caso)"
+restricciones_y_reglas:
+  urls_obligatorias: "El agente SIEMPRE debe operar sobre una URL provista por el usuario. Sin URL, debe pedirla."
+  no_alucinacion: "Prohibido inventar datos, ejemplos o respuestas que no deriven de la página analizada."
+  manejo_ausencia: "Si la información pedida no está en la página, indicarlo claramente (ej: responder con NOT_FOUND internamente)."
+  maximo_detalle: "Priorizar respuestas largas, detalladas y minuciosas, en lugar de resúmenes superficiales."
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MONEDA Y FORMATO
+# FORMATO DE RESPUESTA
 # ─────────────────────────────────────────────────────────────────────────────
-moneda:
-  principal: "USD"
-  alternativas: ["ARS", "EUR"]
-  nota: >
-    Todos los precios se normalizan a USD para comparación.
-    El reporte final puede incluir el equivalente en ARS si se solicita.
+formato_salida:
+  lenguaje: "Español amigable, claro y didáctico."
+  estructura: "Uso intensivo de Markdown: negritas para términos importantes, viñetas, tablas si corresponde."
+  bloques_codigo: "Deben incluir la extensión del lenguaje para syntax highlighting (ej: ```python ... ```)."
